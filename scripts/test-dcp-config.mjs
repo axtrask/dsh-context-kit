@@ -51,20 +51,25 @@ async function withConfigFiles(run) {
   const paths = {
     custom: join(root, 'custom'),
     xdg: join(root, 'xdg', 'opencode'),
+    osHome: join(root, 'os-home'),
+    osHomeOpencode: join(root, 'os-home', '.config', 'opencode'),
     home: join(root, 'home'),
     fallback: root,
     workspace: join(root, 'workspace'),
     workspaceDsh: join(root, 'workspace', '.dsh'),
     workspaceOpencode: join(root, 'workspace', '.opencode')
   };
-  const previous = Object.fromEntries(['DSH_HOME', 'XDG_CONFIG_HOME', 'OPENCODE_CONFIG_DIR'].map((key) => [key, process.env[key]]));
+  const environmentKeys = ['DSH_HOME', 'XDG_CONFIG_HOME', 'OPENCODE_CONFIG_DIR', 'HOME', 'USERPROFILE'];
+  const previous = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
   const scopes = [];
   try {
     for (const path of Object.values(paths)) mkdirSync(path, { recursive: true });
     Object.assign(process.env, {
       DSH_HOME: paths.fallback,
       XDG_CONFIG_HOME: dirname(paths.xdg),
-      OPENCODE_CONFIG_DIR: paths.custom
+      OPENCODE_CONFIG_DIR: paths.custom,
+      HOME: paths.osHome,
+      USERPROFILE: paths.osHome
     });
     const mount = async (rowConfig = {}, provideHome = true) => {
       const context = new Context();
@@ -238,7 +243,52 @@ await withConfigFiles(async ({ paths, mount }) => {
   check('nested recovery restores only the invalid fields', resolved?.compress?.mode === 'range' && resolved?.compress?.permission === 'allow');
 });
 
-console.log('\n--- real files follow this port\'s precedence and shallow layering ---');
+console.log('\n--- OpenCode-owned config files cannot influence DSH ---');
+await withConfigFiles(async ({ paths, mount }) => {
+  const row = {
+    compress: { permission: 'allow', maxContextLimit: 87654 },
+    experimental: { customPrompts: true },
+    prompts: { system: 'DSH-INLINE-PROMPT' }
+  };
+  const directories = [paths.custom, paths.xdg, paths.workspaceOpencode];
+  let fixture = 0;
+  for (const directory of directories) {
+    for (const filename of ['dcp.jsonc', 'dcp.json']) {
+      fixture += 1;
+      const source = join(directory, filename);
+      writeFileSync(source, JSON.stringify({
+        compress: { permission: 'deny', maxContextLimit: 1000 + fixture },
+        experimental: { customPrompts: false },
+        prompts: { system: `OPENCODE-PROMPT-${fixture}` }
+      }), 'utf8');
+      const { config, error, infos, warnings } = await mount(row);
+      const label = `${Object.keys(paths).find((key) => paths[key] === directory)}/${filename}`;
+      check(`${label} is ignored`, error === undefined
+        && config?.compress?.permission === 'allow'
+        && config?.compress?.maxContextLimit === 87654
+        && config?.experimental?.customPrompts === true
+        && config?.prompts?.system === 'DSH-INLINE-PROMPT', error?.message ?? JSON.stringify(config));
+      check(`${label} is absent from applied sources and warnings`, infos.length === 0 && warnings.length === 0, JSON.stringify({ infos, warnings }));
+    }
+  }
+});
+await withConfigFiles(async ({ paths, mount }) => {
+  delete process.env.XDG_CONFIG_HOME;
+  delete process.env.OPENCODE_CONFIG_DIR;
+  const row = { compress: { permission: 'allow', maxContextLimit: 76543 } };
+  for (const filename of ['dcp.jsonc', 'dcp.json']) {
+    const source = join(paths.osHomeOpencode, filename);
+    writeFileSync(source, JSON.stringify({ compress: { permission: 'deny', maxContextLimit: 1 } }), 'utf8');
+    const { config, error, infos, warnings } = await mount(row);
+    check(`home .config/opencode/${filename} is ignored`, error === undefined
+      && config?.compress?.permission === 'allow'
+      && config?.compress?.maxContextLimit === 76543
+      && infos.length === 0
+      && warnings.length === 0, error?.message ?? JSON.stringify({ config, infos, warnings }));
+  }
+});
+
+console.log('\n--- DSH-owned files follow DSH precedence and shallow layering ---');
 await withConfigFiles(async ({ paths, mount }) => {
   const row = {
     compress: { maxContextLimit: 90000, minContextLimit: 2200, summaryBuffer: false },
@@ -246,7 +296,7 @@ await withConfigFiles(async ({ paths, mount }) => {
   };
   const before = JSON.stringify(row);
   const sources = [];
-  const directories = [paths.custom, paths.xdg, paths.home, paths.workspaceDsh, paths.workspaceOpencode];
+  const directories = [paths.home, paths.workspaceDsh];
   for (const directory of directories) {
     for (const filename of ['dcp.jsonc', 'dcp.json']) {
       const limit = 10000 + sources.length * 1000;
@@ -265,11 +315,11 @@ await withConfigFiles(async ({ paths, mount }) => {
       const { config, error, infos, warnings } = await mount(row);
       const label = `${Object.keys(paths).find((key) => paths[key] === directory)}/${filename}`;
       check(`${label} loads through apply`, error === undefined && config?.compress?.maxContextLimit === limit, error?.message ?? JSON.stringify(config?.compress?.maxContextLimit));
-      check(`${label} reports all sources in load order`, infos.length === 1 && infos[0] === `dcp: configuration files applied: ${sources.join(', ')}`, JSON.stringify(infos));
+      check(`${label} reports all DSH sources in load order`, infos.length === 1 && infos[0] === `dcp: configuration files applied: ${sources.join(', ')}`, JSON.stringify(infos));
       check(`${label} has no config warnings`, warnings.length === 0, JSON.stringify(warnings));
       if (sources.length === 2) {
-        check('later file sections replace earlier sections, not deep-merge them', config?.compress?.minContextLimit === 2200 && config?.strategies?.deduplication?.enabled === true);
-        check('the remaining file section still merges with the preset row', config?.compress?.summaryBuffer === false && config?.strategies?.purgeErrors?.turns === 6 && config?.strategies?.deduplication?.protectedTools?.join(',') === 'row-tool');
+        check('later DSH file sections replace earlier sections, not deep-merge them', config?.compress?.minContextLimit === 2200 && config?.strategies?.deduplication?.enabled === true);
+        check('the remaining DSH file section still merges with the preset row', config?.compress?.summaryBuffer === false && config?.strategies?.purgeErrors?.turns === 6 && config?.strategies?.deduplication?.protectedTools?.join(',') === 'row-tool');
       }
       check(`${label} preserves unrelated earlier top-level settings`, config?.pruneNotification === 'off');
     }
@@ -284,7 +334,7 @@ await withConfigFiles(async ({ paths, mount }) => {
   check('missing files are neither reported nor warned about', empty.infos.length === 0 && empty.warnings.length === 0);
   check('editor defaults remain opt-in and idle-only', empty.config?.editor?.enabled === false && empty.config?.editor?.requireIdle === true);
   const source = join(paths.home, 'dcp.jsonc');
-  const rejected = join(paths.workspaceOpencode, 'dcp.json');
+  const rejected = join(paths.workspaceDsh, 'dcp.json');
   writeFileSync(source, JSON.stringify({ compress: { maxContextLimit: 24680 } }), 'utf8');
   for (const [label, contents, nonobject] of [
     ['malformed', '{"compress":', false],
