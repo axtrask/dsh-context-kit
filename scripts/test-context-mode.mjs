@@ -40,7 +40,8 @@ const options = {
   assert.equal(run.exitCode, 3);
   assert.match(run.stderr, /boom/);
   assert.equal(run.ok, false);
-  console.log('sandbox: non-zero exit and stderr are reported');
+  assert.equal(run.processStatus, 'nonzero_exit');
+  console.log('sandbox: non-zero exit stays distinct from other process outcomes');
 }
 
 {
@@ -60,7 +61,8 @@ const options = {
 {
   const run = await runProgram({ ...options, language: 'javascript', code: 'setTimeout(() => {}, 60000);' , timeoutMs: 1500 });
   assert.notEqual(run.exitCode, 0, 'a runaway program is killed by the timeout');
-  console.log('sandbox: timeout kills a runaway program');
+  assert.equal(run.processStatus, 'timeout');
+  console.log('sandbox: timeout remains distinct and kills a runaway program');
 }
 
 {
@@ -145,12 +147,16 @@ const kb = new KnowledgeBase({ path: dbPath, producer: 'test', logger: console }
 {
   const layerArgs = ['fts', ['needle'], null, 'project', undefined, 3, false];
   const ftsErrorDb = { prepare: () => ({ all: () => { throw new Error('fts5: syntax error near "."'); } }) };
-  assert.deepEqual(kb._searchLayer(ftsErrorDb, ...layerArgs), []);
+  const searchState = { invalidQuery: false };
+  assert.deepEqual(kb._searchLayer(ftsErrorDb, ...layerArgs, searchState), []);
+  assert.equal(searchState.invalidQuery, true, 'confirmed FTS errors must remain distinguishable from no matches');
   const prepareFailureDb = { prepare: () => { throw new Error('database is locked'); } };
   assert.throws(() => kb._searchLayer(prepareFailureDb, ...layerArgs), /database is locked/);
   const executeFailureDb = { prepare: () => ({ all: () => { throw new Error('disk I/O error'); } }) };
   assert.throws(() => kb._searchLayer(executeFailureDb, ...layerArgs), /disk I\/O error/);
-  console.log('kb: only confirmed FTS query errors are suppressed');
+  assert.equal(kb.search('fox', { withStatus: true }).status, 'matched');
+  assert.equal(kb.search('definitely-absent-token-9281', { withStatus: true }).status, 'no_matches');
+  console.log('kb: only confirmed FTS query errors are suppressed and statuses stay distinct');
 }
 
 {

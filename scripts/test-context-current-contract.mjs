@@ -16,6 +16,7 @@ const { Context } = await import('@deepseek-ai/cordis');
 const { SessionStore, SessionId } = await import('@deepseek-ai/dsh-session');
 const llm = await import('@deepseek-ai/dsh-llm');
 const contextMode = await import(pathToFileURL(join(kitRoot, 'lib', 'context-mode.js')).href);
+const { KnowledgeBase } = await import(pathToFileURL(join(kitRoot, 'lib', 'knowledge-base.js')).href);
 
 let checks = 0;
 const check = (name, condition, detail = '') => {
@@ -105,7 +106,7 @@ try {
   check('project scope explicitly crosses sessions', projectTimeline.hits > 0);
 
   console.log('\n--- batch scoping ---');
-  await tools.get('ctx_batch_execute').execute({
+  const firstBatch = await tools.get('ctx_batch_execute').execute({
     commands: [{ label: 'old', command: process.platform === 'win32' ? 'Write-Output OLD_BATCH_NEEDLE_771' : 'echo OLD_BATCH_NEEDLE_771' }],
     queries: ['OLD_BATCH_NEEDLE_771'],
     source: 'reused-batch-label'
@@ -116,6 +117,55 @@ try {
     source: 'reused-batch-label'
   }, exec(first, 'batch-two'));
   check('batch-scoped queries cannot see an older run that reused the same label', repeatedBatch.rendered.includes('No matching sections found.'));
+  check('batch query status distinguishes matches', firstBatch.queryStatuses[0].status === 'matched' && firstBatch.queryStatuses[0].hits > 0);
+  check('batch reports separate process, capture, index, and query statuses',
+    repeatedBatch.commandStatuses[0].processStatus === 'success'
+      && repeatedBatch.commandStatuses[0].captureState === 'final'
+      && repeatedBatch.commandStatuses[0].indexStatus === 'indexed'
+      && repeatedBatch.queryStatuses[0].status === 'no_matches');
+
+  const deadlineMarker = join(workspace, 'batch-deadline-must-not-run.txt');
+  const slowCommand = process.platform === 'win32' ? 'Start-Sleep -Milliseconds 400' : 'sleep 0.4';
+  const forbiddenCommand = process.platform === 'win32'
+    ? `Set-Content -LiteralPath '${deadlineMarker.replaceAll("'", "''")}' -Value leaked`
+    : `printf leaked > ${JSON.stringify(deadlineMarker)}`;
+  const deadlineBatch = await tools.get('ctx_batch_execute').execute({
+    commands: [
+      { label: 'consume-deadline', command: slowCommand },
+      { label: 'must-not-start-a', command: forbiddenCommand },
+      { label: 'must-not-start-b', command: forbiddenCommand }
+    ],
+    queries: ['DEADLINE_OUTPUT_THAT_DOES_NOT_EXIST_553'],
+    concurrency: 1,
+    timeout: 80
+  }, exec(first, 'batch-deadline'));
+  check('batch deadline does not launch queued commands with a synthetic 1 ms timeout',
+    deadlineBatch.commandStatuses[0].processStatus === 'timeout'
+      && deadlineBatch.commandStatuses.slice(1).every((status) => status.processStatus === 'not_started_deadline'
+        && status.captureState === 'none'
+        && status.indexStatus === 'skipped')
+      && !existsSync(deadlineMarker));
+  check('batch query status distinguishes no matches', deadlineBatch.queryStatuses[0].status === 'no_matches');
+
+  const originalSearch = KnowledgeBase.prototype.search;
+  KnowledgeBase.prototype.search = function statusSeam(query, options) {
+    if (query === 'FORCE_INVALID_QUERY_STATUS_773') return { status: 'invalid_query', rows: [] };
+    if (query === 'FORCE_DATABASE_ERROR_STATUS_884') throw new Error('database is locked for status guard');
+    return originalSearch.call(this, query, options);
+  };
+  let failedQueryBatch;
+  try {
+    failedQueryBatch = await tools.get('ctx_batch_execute').execute({
+      commands: [{ label: 'status-seam', command: process.platform === 'win32' ? 'Write-Output STATUS_SEAM' : 'echo STATUS_SEAM' }],
+      queries: ['FORCE_INVALID_QUERY_STATUS_773', 'FORCE_DATABASE_ERROR_STATUS_884']
+    }, exec(first, 'batch-query-statuses'));
+  } finally {
+    KnowledgeBase.prototype.search = originalSearch;
+  }
+  check('batch query statuses keep invalid input distinct from database failures',
+    failedQueryBatch.queryStatuses[0].status === 'invalid_query'
+      && failedQueryBatch.queryStatuses[1].status === 'database_error'
+      && /database is locked/.test(failedQueryBatch.queryStatuses[1].error));
 
   console.log('\n--- background detachment ---');
   const marker = join(workspace, 'background-marker.txt');
