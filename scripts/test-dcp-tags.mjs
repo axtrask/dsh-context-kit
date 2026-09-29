@@ -1,5 +1,5 @@
 /**
- * Production-boundary checks for DCP's stable mNNNN aliases.
+ * Production-boundary checks for DCP's stable canonical message aliases.
  *
  * Run: node scripts/test-dcp-tags.mjs
  */
@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import * as dcp from '../lib/dcp.js';
 import * as dcpPlugin from '../lib/dcp-plugin.js';
 import { DcpBlockState } from '../lib/dcp-blocks.js';
-import { formatMessageIdTag, formatMessageRef, parseBoundaryId } from '../lib/dcp-message-ids.js';
+import { formatMessageIdTag, formatMessageRef, parseBoundaryId, parseMessageRef } from '../lib/dcp-message-ids.js';
 import { editStoreFor } from '../lib/edit-bridge.js';
 import { editableIndex } from '../lib/edit-durable.js';
 
@@ -24,9 +24,20 @@ const stateHome = mkdtempSync(join(tmpdir(), 'dcp-tags-state-'));
 const previousDshHome = process.env.DSH_HOME;
 process.env.DSH_HOME = stateHome;
 
-check('message refs use the upstream fixed-width form', formatMessageRef(1) === 'm0001' && formatMessageRef(9999) === 'm9999');
-check('boundary parsing accepts normalized mNNNN/bN only', parseBoundaryId(' M0007 ')?.ref === 'm0007'
-  && parseBoundaryId('b12')?.blockId === 12 && parseBoundaryId('7') === null);
+check('message refs use four digits through 9999 and five digits through 99999',
+  formatMessageRef(1) === 'm0001'
+  && formatMessageRef(9999) === 'm9999'
+  && formatMessageRef(10000) === 'm10000'
+  && formatMessageRef(99999) === 'm99999');
+check('message parsing accepts both canonical widths and keeps normalization',
+  parseMessageRef(' M0001 ') === 1
+  && parseMessageRef('m9999') === 9999
+  && parseMessageRef('M10000') === 10000
+  && parseMessageRef('m99999') === 99999);
+check('message parsing rejects noncanonical and out-of-capacity forms',
+  ['m1', 'm00001', 'm0000', 'm100000'].every((ref) => parseMessageRef(ref) === null));
+check('boundary parsing accepts canonical message/block refs only', parseBoundaryId(' M10000 ')?.ref === 'm10000'
+  && parseBoundaryId('b12')?.blockId === 12 && parseBoundaryId('m00001') === null && parseBoundaryId('7') === null);
 check('message-id tag attributes are sorted and escaped', formatMessageIdTag('m0001', { z: '<x>', a: '"' }) === '\n<dcp-message-id a="&quot;" z="&lt;x&gt;">m0001</dcp-message-id>');
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const text = (value) => ({ type: 'text', text: value });

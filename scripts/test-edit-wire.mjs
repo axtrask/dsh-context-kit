@@ -60,7 +60,7 @@ const gui = await import(`${new URL('../lib/edit-gui.js', import.meta.url).href}
 const text = (value) => ({ type: 'text', text: value });
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const withoutDcpTag = (value) => typeof value === 'string'
-  ? value.replace(/\n\n<dcp-message-id>m\d{4}<\/dcp-message-id>\s*$/u, '')
+  ? value.replace(/\n\n<dcp-message-id>m(?:\d{4}|[1-9]\d{4})<\/dcp-message-id>\s*$/u, '')
   : value;
 
 /**

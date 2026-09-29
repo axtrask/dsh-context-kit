@@ -283,9 +283,9 @@ try {
     const mounted = await mount({ strategies: strategiesOff, pruneNotification: 'off' });
     const session = await createSession(mounted);
     const state = mounted.engine.blocksFor(session);
-    state.messageIds.byRawId.set('capacity', 'm9999');
-    state.messageIds.byRef.set('m9999', 'capacity');
-    state.messageIds.nextRef = 10000;
+    state.messageIds.byRawId.set('capacity', 'm99999');
+    state.messageIds.byRef.set('m99999', 'capacity');
+    state.messageIds.nextRef = 100000;
     session.append('compaction/end', { turn: 1, ok: true });
     await tick();
     assert.equal(state.messageIds.nextRef, 1);
@@ -316,7 +316,7 @@ try {
     source.append('compaction/end', { turn: 1, ok: true });
     const path = join(home, 'context-kit', 'dcp-state', `${replayId}.json`);
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify({ version: DCP_STATE_VERSION, nextBlockId: 1, messageIds: { nextRef: 10000, byRawId: { capacity: 'm9999' } }, lastCompaction: 0 }), 'utf8');
+    writeFileSync(path, JSON.stringify({ version: DCP_STATE_VERSION, nextBlockId: 1, messageIds: { nextRef: 100000, byRawId: { capacity: 'm99999' } }, lastCompaction: 0 }), 'utf8');
     const replay = await createSession(mounted, { id: replayId, seed: source.snapshotEvents() });
     const restored = mounted.engine.blocksFor(replay);
     assert.equal(restored.messageIds.nextRef, 1);
