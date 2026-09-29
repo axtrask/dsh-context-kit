@@ -1,0 +1,25 @@
+{
+  "name": "dsh-context-kit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Native DeepSeek Harness ports of DCP (dynamic context pruning) and context-mode (sandboxed tool output and a searchable knowledge base).",
+  "exports": {
+    ".": "./lib/index.js",
+    "./dcp": "./lib/dcp.js",
+    "./context-mode": "./lib/context-mode.js",
+    "./dcp-plugin": "./lib/dcp-plugin.js",
+    "./context-mode-plugin": "./lib/context-mode-plugin.js",
+    "./editor-plugin": "./lib/editor-plugin.js",
+    "./client": "./lib/edit-client.js"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": ["@deepseek-ai/dsh-api-session-controller", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-settings-plugins"]
+    }
+  },
+  "files": [
+    "lib"
+  ]
+}

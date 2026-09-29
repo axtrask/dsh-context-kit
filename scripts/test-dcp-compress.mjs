@@ -1,0 +1,349 @@
+/** Production-boundary tests for the DSH DCP compression contract. */
+
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const testHome = mkdtempSync(join(tmpdir(), 'dsh-dcp-compress-'));
+process.env.DSH_HOME = testHome;
+
+const { Context } = await import('@deepseek-ai/cordis');
+const { Session, SessionId } = await import('@deepseek-ai/dsh-session');
+const llm = await import('@deepseek-ai/dsh-llm');
+const dcp = await import('../lib/dcp.js');
+const placeholders = await import('../lib/dcp-block-placeholders.js');
+
+const failures = [];
+const scopes = [];
+let sessionCounter = 0;
+
+function check(name, ok, detail = '') {
+  console.log(`${ok ? '[ok]  ' : '[FAIL]'} ${name}${detail ? ` - ${detail}` : ''}`);
+  if (!ok) failures.push(name);
+}
+
+const text = (value) => ({ type: 'text', text: value });
+const nextSessionId = () => SessionId(`compress-${process.pid}-${Date.now()}-${++sessionCounter}`);
+const modelText = (session) => JSON.stringify(session.deriveMessages());
+const countOf = (value, needle) => value.split(needle).length - 1;
+
+async function mount(config = {}) {
+  const root = new Context();
+  const tools = new Map();
+  root.provide('tools', { register(definition) { tools.set(definition.name, definition); return () => {}; } });
+  root.provide('llm', llm);
+  root.provide('tokenMeter', {
+    estimateMessage: (message) => JSON.stringify(message?.content ?? message ?? '').length,
+    measure: () => ({ nodes: [] })
+  });
+  const scope = root.plugin(dcp, {
+    manualMode: false,
+    automaticStrategies: false,
+    strategies: { deduplication: { enabled: false }, purgeErrors: { enabled: false } },
+    ...config
+  });
+  scopes.push(scope);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  return { tool: tools.get('compress'), engine: dcp.engineForTest() };
+}
+
+function appendUser(session, value, source = { kind: 'user' }) {
+  return session.append('user/message', llm.createUserMessage({ content: [text(value)], source }), { surfaceOp: 'append' });
+}
+
+function appendAssistant(session, calls, body) {
+  return session.append('assistant/message', {
+    turn: 1,
+    step: 1,
+    stream: [],
+    message: llm.createAssistantMessage({
+      content: [
+        ...(body === undefined ? [] : [text(body)]),
+        ...calls.map((call) => ({
+          type: 'tool-call',
+          id: llm.ToolCallId(call.id),
+          name: call.name,
+          arguments: JSON.stringify(call.args ?? {})
+        }))
+      ],
+      source: { kind: 'model', provider: 'probe', model: 'probe' }
+    })
+  }, { surfaceOp: 'append' });
+}
+
+function appendResult(session, call, output) {
+  return session.append('tool/result', {
+    turn: 1,
+    step: 1,
+    message: llm.createToolResultMessage({
+      callId: llm.ToolCallId(call.id),
+      content: [text(output)],
+      isError: false
+    })
+  }, { surfaceOp: 'append' });
+}
+
+function fixture(options = {}) {
+  const session = Session.create(nextSessionId());
+  session.append('turn/start', { turn: 1 });
+  const system = options.system === false ? undefined : session.append('system/message', {
+    message: llm.createSystemMessage('SYSTEM-ONLY', 'fixture')
+  }, { surfaceOp: 'append' });
+  const user = appendUser(session, options.user ?? 'USER-INSTRUCTION');
+  const calls = options.calls ?? [{ id: 'call-1', name: 'read', args: { filePath: 'a.js' } }];
+  const assistant = appendAssistant(session, calls, options.assistant);
+  const outputs = options.outputs ?? calls.map((call, index) => [call, `OUTPUT-${index + 1}`]);
+  const results = outputs.map(([call, output]) => appendResult(session, call, output));
+  const tail = options.tail === false ? undefined : appendUser(session, options.tail ?? 'TAIL-QUESTION');
+  return { session, system, user, assistant, calls, results, tail };
+}
+
+function execFor(session) {
+  return {
+    callId: 'compress-call',
+    rootCallId: 'compress-call',
+    name: 'compress',
+    token: Symbol('compress'),
+    arguments: {},
+    signal: new AbortController().signal,
+    agent: { id: 'test-agent', session },
+    deferContext() {},
+    concludeTurn() {}
+  };
+}
+
+function ref(engine, session, event) {
+  return engine.boundaryRefAtSeq(session, Number(event.seq));
+}
+
+async function compressRange(instance, fixtureValue, start, end, summary, topic = 'Closed work') {
+  return instance.tool.execute({
+    topic,
+    content: [{
+      startId: typeof start === 'string' ? start : ref(instance.engine, fixtureValue.session, start),
+      endId: typeof end === 'string' ? end : ref(instance.engine, fixtureValue.session, end),
+      summary
+    }]
+  }, execFor(fixtureValue.session));
+}
+
+try {
+  console.log('--- model-facing schema and prompts ---');
+  const standard = await mount();
+  check('compress is registered', standard.tool !== undefined);
+  const rootProperties = Object.keys(standard.tool?.parameters?.properties ?? {});
+  const rangeProperties = Object.keys(standard.tool?.parameters?.properties?.content?.items?.properties ?? {});
+  check('the root schema is topic + content', JSON.stringify(rootProperties.sort()) === JSON.stringify(['content', 'topic']));
+  check('range entries are exactly startId/endId/summary', JSON.stringify(rangeProperties.sort()) === JSON.stringify(['endId', 'startId', 'summary']));
+  check('range boundaries and topic are strings', standard.tool.parameters.properties.topic.type === 'string'
+    && standard.tool.parameters.properties.content.items.properties.startId.type === 'string'
+    && standard.tool.parameters.properties.content.items.properties.endId.type === 'string');
+  const description = standard.tool.description;
+  check('the tool description teaches mNNNN and bN', description.includes('mNNNN') && description.includes('bN'));
+  check('numeric protocol is absent from the model-facing tool', !/start_seq|end_seq|\[id\]|seq: number/.test(description + JSON.stringify(standard.tool.parameters)));
+
+  const oldShapeFixture = fixture();
+  let oldShapeError;
+  try {
+    await standard.tool.execute({ topic: 'old shape', content: [{ start_seq: 1, end_seq: 2, summary: 'must fail' }] }, execFor(oldShapeFixture.session));
+  } catch (error) {
+    oldShapeError = error;
+  }
+  check('the shipped numeric input shape is rejected', /missing required property "content\[0\]\.startId"/.test(oldShapeError?.message ?? '')
+    && /start_seq.*not a declared property/.test(oldShapeError?.message ?? ''), oldShapeError?.message);
+
+  console.log('\n--- validation and system exclusion ---');
+  for (const [args, expected] of [
+    [{ topic: '', content: [{ startId: 'm0001', endId: 'm0001', summary: 'x' }] }, 'topic is required and must be a non-empty string'],
+    [{ topic: 'x', content: [] }, 'content is required and must be a non-empty array'],
+    [{ topic: 'x', content: [{ startId: '', endId: 'm0001', summary: 'x' }] }, 'content[0].startId is required and must be a non-empty string'],
+    [{ topic: 'x', content: [{ startId: 'm0001', endId: '', summary: 'x' }] }, 'content[0].endId is required and must be a non-empty string'],
+    [{ topic: 'x', content: [{ startId: 'm0001', endId: 'm0001', summary: '' }] }, 'content[0].summary is required and must be a non-empty string']
+  ]) {
+    const sample = fixture();
+    let message = '';
+    try { await standard.tool.execute(args, execFor(sample.session)); } catch (error) { message = error.message; }
+    check(expected, message === expected, message);
+  }
+
+  const unavailable = fixture();
+  const systemRef = standard.engine.boundaryRefAtSeq(unavailable.session, Number(unavailable.system.seq));
+  check('system messages have no boundary alias', systemRef === undefined, String(systemRef));
+  const unavailableBefore = JSON.stringify(unavailable.session.snapshotEvents());
+  let unavailableError;
+  try {
+    await standard.tool.execute({ topic: 'bad boundary', content: [{ startId: 'm9999', endId: 'm9999', summary: 'x' }] }, execFor(unavailable.session));
+  } catch (error) { unavailableError = error; }
+  check('an unavailable alias is rejected with upstream wording', unavailableError?.message === 'startId m9999 is not available in the current conversation context. Choose an injected ID visible in context.\n- endId m9999 is not available in the current conversation context. Choose an injected ID visible in context.'
+    || unavailableError?.message === '- startId m9999 is not available in the current conversation context. Choose an injected ID visible in context.\n- endId m9999 is not available in the current conversation context. Choose an injected ID visible in context.', unavailableError?.message);
+  check('a refused boundary does not append to the durable log', JSON.stringify(unavailable.session.snapshotEvents()) === unavailableBefore);
+
+  const reversed = fixture();
+  const reversedStart = ref(standard.engine, reversed.session, reversed.tail);
+  const reversedEnd = ref(standard.engine, reversed.session, reversed.user);
+  let reversedError;
+  try {
+    await standard.tool.execute({ topic: 'reversed', content: [{ startId: reversedStart, endId: reversedEnd, summary: 'x' }] }, execFor(reversed.session));
+  } catch (error) { reversedError = error; }
+  check('reversed aliases use upstream ordering error', reversedError?.message === `startId ${reversedStart} appears after endId ${reversedEnd} in the conversation. Start must come before end.`, reversedError?.message);
+
+  const overlap = fixture();
+  const overlapUser = ref(standard.engine, overlap.session, overlap.user);
+  const overlapAssistant = ref(standard.engine, overlap.session, overlap.assistant);
+  const overlapTail = ref(standard.engine, overlap.session, overlap.tail);
+  const overlapBefore = JSON.stringify(overlap.session.snapshotEvents());
+  let overlapError;
+  try {
+    await standard.tool.execute({ topic: 'overlap', content: [
+      { startId: overlapUser, endId: overlapAssistant, summary: 'first' },
+      { startId: overlapAssistant, endId: overlapTail, summary: 'second' }
+    ] }, execFor(overlap.session));
+  } catch (error) { overlapError = error; }
+  check('overlapping alias ranges are rejected before writes', /overlaps content\[1\].*Overlapping ranges cannot be compressed in the same batch/.test(overlapError?.message ?? '')
+    && JSON.stringify(overlap.session.snapshotEvents()) === overlapBefore, overlapError?.message);
+
+  console.log('\n--- same-boundary message compression ---');
+  const oneUser = fixture();
+  const userAlias = ref(standard.engine, oneUser.session, oneUser.user);
+  const userValue = await compressRange(standard, oneUser, userAlias, userAlias, 'USER-SUMMARY');
+  check('startId=endId is accepted for a raw user message', userValue.compressed === true && userValue.compressedMessages === 1, JSON.stringify(userValue));
+  check('the selected user text leaves the model view', !modelText(oneUser.session).includes('USER-INSTRUCTION'));
+  check('the replacement summary enters the model view', modelText(oneUser.session).includes('USER-SUMMARY'));
+
+  const batch = fixture();
+  const batchUser = ref(standard.engine, batch.session, batch.user);
+  const batchTail = ref(standard.engine, batch.session, batch.tail);
+  const batchValue = await standard.tool.execute({ topic: 'Two closed messages', content: [
+    { startId: batchUser, endId: batchUser, summary: 'BATCH-USER' },
+    { startId: batchTail, endId: batchTail, summary: 'BATCH-TAIL' }
+  ] }, execFor(batch.session));
+  check('non-overlapping ranges batch in one call', batchValue.compressed === true && batchValue.blocks.length === 2 && batchValue.compressedMessages === 2);
+
+  const multiCalls = [
+    { id: 'multi-1', name: 'read', args: { filePath: 'a.js' } },
+    { id: 'multi-2', name: 'read', args: { filePath: 'b.js' } }
+  ];
+  const toolOnly = fixture({ calls: multiCalls, outputs: [[multiCalls[0], 'MULTI-ONE'], [multiCalls[1], 'MULTI-TWO']] });
+  const assistantAlias = ref(standard.engine, toolOnly.session, toolOnly.assistant);
+  check('both completed tool outputs resolve to the assistant alias', toolOnly.results.every((event) => ref(standard.engine, toolOnly.session, event) === assistantAlias), assistantAlias);
+  const toolOnlyValue = await compressRange(standard, toolOnly, assistantAlias, assistantAlias, 'ASSISTANT-WITH-TOOLS-SUMMARY');
+  const toolOnlyView = modelText(toolOnly.session);
+  check('one assistant ID compresses its message and every completed tool result', toolOnlyValue.compressed === true && !toolOnlyView.includes('MULTI-ONE') && !toolOnlyView.includes('MULTI-TWO'), toolOnlyView);
+  check('the compressed transcript has no orphaned selected tool pair', !toolOnlyView.includes('multi-1') && !toolOnlyView.includes('multi-2'));
+
+  console.log('\n--- exact block wrapper and bN boundaries ---');
+  const boundary = fixture();
+  const first = await compressRange(standard, boundary, boundary.assistant, boundary.assistant, 'FIRST-BLOCK');
+  check('the first compression lands as b1', first.blocks[0]?.blockId === '1');
+  const exactWrapper = '[Compressed conversation section]\nFIRST-BLOCK\n\n<dcp-message-id>b1</dcp-message-id>';
+  check('the durable replacement wrapper is exact', standard.engine.blocksFor(boundary.session).get('1')?.summary === exactWrapper, JSON.stringify(standard.engine.blocksFor(boundary.session).get('1')?.summary));
+  const boundaryValue = await compressRange(standard, boundary, 'b1', ref(standard.engine, boundary.session, boundary.tail), 'AFTER-BOUNDARY');
+  const boundaryText = modelText(boundary.session);
+  check('bN can be a range boundary', boundaryValue.compressed === true, boundaryValue.reason ?? '');
+  check('an omitted start-boundary block is inserted before the new summary', boundaryText.indexOf('FIRST-BLOCK') < boundaryText.indexOf('AFTER-BOUNDARY'));
+  check('the consumed block is inactive and the new block is active', standard.engine.blocksFor(boundary.session).get('1')?.active === false && standard.engine.blocksFor(boundary.session).active().length === 1);
+
+  const blockOnly = fixture();
+  await compressRange(standard, blockOnly, blockOnly.assistant, blockOnly.assistant, 'BLOCK-ONLY-FIRST');
+  const blockOnlyValue = await compressRange(standard, blockOnly, 'b1', 'b1', 'BLOCK-ONLY-SECOND');
+  check('startId=endId is accepted for a compressed block boundary', blockOnlyValue.compressed === true, blockOnlyValue.reason ?? '');
+  check('a block-only replacement carries the old block exactly once', countOf(modelText(blockOnly.session), 'BLOCK-ONLY-FIRST') === 1);
+
+  console.log('\n--- placeholder consume, remove, and append semantics ---');
+  const inner = fixture();
+  await compressRange(standard, inner, inner.assistant, inner.assistant, 'INNER-FACT');
+  const outerValue = await compressRange(
+    standard,
+    inner,
+    ref(standard.engine, inner.session, inner.user),
+    ref(standard.engine, inner.session, inner.tail),
+    'before (b1) after duplicate (b1) unknown (b99)'
+  );
+  const outerText = modelText(inner.session);
+  check('a selected inner placeholder expands its saved summary', outerText.includes('INNER-FACT') && outerValue.blocks[0].consumedBlockIds.includes('1'));
+  check('duplicate and unknown placeholder literals remain untouched', countOf(outerText, '(b1)') === 1 && outerText.includes('(b99)'), outerText);
+  check('expanded block content appears exactly once', countOf(outerText, 'INNER-FACT') === 1, String(countOf(outerText, 'INNER-FACT')));
+
+  const omitted = fixture();
+  await compressRange(standard, omitted, omitted.assistant, omitted.assistant, 'OMITTED-INNER-FACT');
+  const omittedValue = await compressRange(
+    standard,
+    omitted,
+    ref(standard.engine, omitted.session, omitted.user),
+    ref(standard.engine, omitted.session, omitted.tail),
+    'OUTER-WITHOUT-PLACEHOLDER'
+  );
+  const omittedText = modelText(omitted.session);
+  check('an omitted selected inner block is appended', omittedText.includes('The following previously compressed summaries were also part of this conversation section:') && omittedText.includes('### (b1)') && omittedText.includes('OMITTED-INNER-FACT'), omittedText);
+  check('the append is reported and consumes the old block', JSON.stringify(omittedValue.blocks[0].appendedBlockIds) === '["1"]' && omittedValue.blocks[0].consumedBlockIds.includes('1'));
+
+  console.log('\n--- protected outputs use patterns and call-id binding ---');
+  const protectedInstance = await mount({
+    compress: { protectedTools: ['keep_exact', 'mcp_*'] },
+    protectedFilePatterns: ['**/*.env']
+  });
+  const calls = [
+    { id: 'keep-id', name: 'keep_exact', args: {} },
+    { id: 'wild-id', name: 'mcp_fetch', args: {} },
+    { id: 'file-id', name: 'read', args: { filePath: 'C:\\repo\\.env' } },
+    { id: 'drop-id', name: 'drop_me', args: {} }
+  ];
+  const protectedFixture = fixture({
+    calls,
+    outputs: [
+      [calls[3], 'DROP-OUTPUT'],
+      [calls[2], 'FILE-OUTPUT'],
+      [calls[0], 'EXACT-OUTPUT'],
+      [calls[1], 'WILDCARD-OUTPUT']
+    ]
+  });
+  const protectedValue = await compressRange(protectedInstance, protectedFixture, protectedFixture.assistant, protectedFixture.assistant, 'PROTECTED-SUMMARY');
+  const protectedSummary = protectedInstance.engine.blocksFor(protectedFixture.session).get(protectedValue.blocks[0].blockId)?.summary ?? '';
+  check('exact protected tool output is bound by call id', protectedSummary.includes('### Tool: keep_exact\nEXACT-OUTPUT'));
+  check('wildcard protected tool output is preserved', protectedSummary.includes('### Tool: mcp_fetch\nWILDCARD-OUTPUT'));
+  check('protected file output is preserved', protectedSummary.includes('### Tool: read\nFILE-OUTPUT'));
+  check('an unprotected result is not carried by positional accident', !protectedSummary.includes('DROP-OUTPUT'), protectedSummary);
+
+  console.log('\n--- result rendering, message mode, and permission ---');
+  const renderedFixture = fixture();
+  const renderedArgs = {
+    topic: 'Rendered result',
+    content: [{ startId: ref(standard.engine, renderedFixture.session, renderedFixture.user), endId: ref(standard.engine, renderedFixture.session, renderedFixture.user), summary: 'DONE' }]
+  };
+  const renderedValue = await standard.tool.execute(renderedArgs, execFor(renderedFixture.session));
+  const rendered = standard.tool.output.render(renderedArgs, renderedValue).map((part) => part.text).join('');
+  check('successful output matches upstream wording', rendered === 'Compressed 1 messages into [Compressed conversation section].', rendered);
+  check('successful output exposes no internal seq values', !/seq|range \d|shadowed/i.test(rendered), rendered);
+
+  const messageMode = await mount({ compress: { mode: 'message' } });
+  const messageProperties = Object.keys(messageMode.tool.parameters.properties.content.items.properties).sort();
+  check('message mode also uses string aliases, never numeric seq', JSON.stringify(messageProperties) === JSON.stringify(['messageId', 'summary', 'topic']));
+  const messageFixture = fixture();
+  const messageId = ref(messageMode.engine, messageFixture.session, messageFixture.user);
+  const messageValue = await messageMode.tool.execute({
+    topic: 'One message',
+    content: [{ messageId, topic: 'User instruction', summary: 'MESSAGE-MODE-SUMMARY' }]
+  }, execFor(messageFixture.session));
+  check('message mode resolves an mNNNN alias', messageValue.compressed === true && modelText(messageFixture.session).includes('MESSAGE-MODE-SUMMARY'));
+
+  const denied = await mount({ compress: { permission: 'deny' } });
+  check('permission deny removes the tool', denied.tool === undefined);
+
+  console.log('\n--- placeholder unit falsification ---');
+  const lookup = new Map([[1, placeholders.wrapBlockSummary(1, 'SAVED')]]);
+  const parsed = placeholders.parseBlockPlaceholders('(b1) duplicate (b1) unknown (b9)');
+  const startReference = { kind: 'message', ref: 'm0001' };
+  const endReference = { kind: 'message', ref: 'm0002' };
+  const missing = placeholders.validateSummaryPlaceholders(parsed, [1], startReference, endReference, lookup);
+  const injected = placeholders.injectBlockPlaceholders('(b1) duplicate (b1) unknown (b9)', parsed, lookup, startReference, endReference);
+  check('validation keeps one selected placeholder and no missing IDs', parsed.length === 1 && parsed[0].blockId === 1 && missing.length === 0);
+  check('injection expands the validated first placeholder and leaves filtered literals', injected.expandedSummary.includes('SAVED') && countOf(injected.expandedSummary, '(b1)') === 1 && injected.expandedSummary.includes('(b9)'), injected.expandedSummary);
+  const deletingInvalid = injected.expandedSummary.replace(/\(b\d+\)/g, '');
+  check('deleting filtered placeholder literals WOULD fail upstream parity', !deletingInvalid.includes('(b9)'));
+} finally {
+  for (const scope of scopes.reverse()) await scope.dispose();
+  rmSync(testHome, { recursive: true, force: true });
+}
+
+console.log(failures.length === 0 ? '\nall DCP compress tests passed' : `\n${failures.length} failure(s)`);
+process.exit(failures.length === 0 ? 0 : 1);
