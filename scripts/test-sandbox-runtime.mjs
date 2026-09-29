@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync
 } from 'node:fs';
@@ -16,6 +17,7 @@ import {
   LANGUAGES,
   cleanupScratch,
   launchPlanForTest,
+  readCaptureText,
   runProgram
 } from '../lib/sandbox.js';
 
@@ -48,6 +50,57 @@ try {
   check('both streams contributed to the shared bound', bounded.stdoutTruncated && bounded.stderrTruncated);
   check('full UTF-8 byte metadata is exact', bounded.fullStdoutBytes === 480 && bounded.fullStderrBytes === 240);
   check('UTF-8 truncation never creates replacement characters', !bounded.stdout.includes('\uFFFD') && !bounded.stderr.includes('\uFFFD'));
+
+  console.log('\n--- physically bounded head and rolling tail ---');
+  const stdoutPayload = `STDOUT-HEAD-${'a'.repeat(5_000)}-STDOUT-TAIL-DONE`;
+  const stderrPayload = `STDERR-HEAD-${'b'.repeat(3_000)}-STDERR-TAIL-DONE`;
+  const capped = await runProgram({
+    ...base,
+    language: 'javascript',
+    captureMaxBytesPerStream: 1_024,
+    code: `process.stdout.write(${JSON.stringify(stdoutPayload)}); process.stderr.write(${JSON.stringify(stderrPayload)});`
+  });
+  const retainedStdout = readCaptureText(capped.stdoutCapture, 'stdout');
+  const retainedStderr = readCaptureText(capped.stderrCapture, 'stderr');
+  const stdoutStoredOnDisk = statSync(capped.spillPath).size + statSync(capped.stdoutTailPath).size;
+  const stderrStoredOnDisk = statSync(capped.stderrPath).size + statSync(capped.stderrTailPath).size;
+  check('capture cap does not change process success', capped.ok && capped.exitCode === 0 && capped.processStatus === 'success');
+  check('stdout counters distinguish observed, stored, and dropped bytes', capped.stdoutCapture.observedBytes === Buffer.byteLength(stdoutPayload) && capped.stdoutCapture.storedBytes === 1_024 && capped.stdoutCapture.droppedBytes === Buffer.byteLength(stdoutPayload) - 1_024);
+  check('stderr has an independent physical cap', capped.stderrCapture.observedBytes === Buffer.byteLength(stderrPayload) && capped.stderrCapture.storedBytes === 1_024 && capped.stderrCapture.droppedBytes === Buffer.byteLength(stderrPayload) - 1_024);
+  check('capture files never exceed either per-stream cap', stdoutStoredOnDisk <= 1_024 && stderrStoredOnDisk <= 1_024, `${stdoutStoredOnDisk}/${stderrStoredOnDisk}`);
+  check('retained stdout contains the head and final rolling tail', retainedStdout.startsWith('STDOUT-HEAD-') && retainedStdout.endsWith('-STDOUT-TAIL-DONE'));
+  check('retained stderr contains the head and final rolling tail', retainedStderr.startsWith('STDERR-HEAD-') && retainedStderr.endsWith('-STDERR-TAIL-DONE'));
+  check('Windows uses the broker rather than forbidden Node pipes', process.platform !== 'win32' || capped.captureBackend === 'powershell-broker');
+
+  const multibyte = await runProgram({
+    ...base,
+    language: 'javascript',
+    captureMaxBytesPerStream: 101,
+    code: 'process.stdout.write("начало-" + "🎯".repeat(100) + "-конец");'
+  });
+  const retainedMultibyte = readCaptureText(multibyte.stdoutCapture, 'stdout');
+  check('ring boundaries do not emit malformed UTF-8', !retainedMultibyte.includes('\uFFFD') && retainedMultibyte.includes('начало') && retainedMultibyte.endsWith('-конец'));
+
+  console.log('\n--- detached capture finalization ---');
+  let finishBackground;
+  const backgroundFinal = new Promise((resolve) => { finishBackground = resolve; });
+  const detached = await runProgram({
+    ...base,
+    language: 'javascript',
+    captureMaxBytesPerStream: 256,
+    timeoutMs: 60,
+    background: true,
+    code: 'process.stdout.write("DETACHED-HEAD-"); setTimeout(() => { process.stdout.write("x".repeat(1000) + "-DETACHED-TAIL"); }, 180); setTimeout(() => process.exit(0), 220);',
+    onBackgroundFinal: finishBackground
+  });
+  check('detached result exposes provisional capture metadata', detached.backgrounded && detached.captureState === 'provisional' && detached.exitCode === null);
+  const detachedFinal = await Promise.race([
+    backgroundFinal,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('detached finalization callback timed out')), 5_000))
+  ]);
+  const retainedDetached = readCaptureText(detachedFinal.stdoutCapture, 'stdout');
+  check('detached completion exposes exact final metadata', detachedFinal.captureState === 'final' && detachedFinal.captureComplete && detachedFinal.exitCode === 0);
+  check('detached final capture keeps completion tail without killing producer', retainedDetached.endsWith('-DETACHED-TAIL'));
 
   console.log('\n--- successful stderr capture ---');
   const diagnostic = await runProgram({

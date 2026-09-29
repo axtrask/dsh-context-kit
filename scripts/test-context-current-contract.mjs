@@ -117,12 +117,14 @@ try {
 
   console.log('\n--- background detachment ---');
   const marker = join(workspace, 'background-marker.txt');
-  const code = `setTimeout(async () => { const fs = await import('node:fs'); fs.writeFileSync(${JSON.stringify(marker)}, 'done'); process.exit(0); }, 350);`;
+  const code = `setTimeout(async () => { const fs = await import('node:fs'); fs.writeFileSync(${JSON.stringify(marker)}, 'done'); console.log('BACKGROUND_FINAL_INDEX_441'); process.exit(0); }, 350);`;
   const started = Date.now();
   const background = await tools.get('ctx_execute').execute({ language: 'javascript', code, timeout: 80, background: true }, exec(first, 'background'));
   check('background mode detaches at its timeout instead of killing the tree', Date.now() - started < 1000 && /still running in background/.test(background.rendered), background.rendered);
-  await wait(600);
+  await wait(1500);
   check('the detached process completes after the tool returns', existsSync(marker));
+  const finalBackgroundHit = await tools.get('ctx_search').execute({ queries: ['BACKGROUND_FINAL_INDEX_441'] }, exec(first, 'background-final-search'));
+  check('detached final output is indexed after process exit', finalBackgroundHit.hits > 0);
 
   const disposedMarker = join(workspace, 'disposed-background-marker.txt');
   const disposedCode = `setTimeout(async () => { const fs = await import('node:fs'); fs.writeFileSync(${JSON.stringify(disposedMarker)}, 'leaked'); process.exit(0); }, 700);`;
