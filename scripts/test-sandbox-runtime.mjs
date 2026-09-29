@@ -40,14 +40,14 @@ const base = {
 };
 
 try {
-  console.log('--- shared UTF-8 byte budget ---');
+  console.log('--- shared inline-preview UTF-8 byte budget ---');
   const bounded = await runProgram({
     ...base,
     language: 'javascript',
     code: '/* UTF-8 stress sample */ process.stdout.write("🎯".repeat(120)); process.stderr.write("Ж".repeat(120)); process.exit(2);'
   });
-  check('stdout and stderr share one 256-byte budget', bounded.boundedOutputBytes <= 256, `${bounded.boundedOutputBytes} bytes`);
-  check('both streams contributed to the shared bound', bounded.stdoutTruncated && bounded.stderrTruncated);
+  check('stdout and stderr share only the 256-byte inline-preview budget', bounded.boundedOutputBytes <= 256, `${bounded.boundedOutputBytes} bytes`);
+  check('both streams contributed to the shared inline preview', bounded.stdoutTruncated && bounded.stderrTruncated);
   check('full UTF-8 byte metadata is exact', bounded.fullStdoutBytes === 480 && bounded.fullStderrBytes === 240);
   check('UTF-8 truncation never creates replacement characters', !bounded.stdout.includes('\uFFFD') && !bounded.stderr.includes('\uFFFD'));
 
@@ -67,6 +67,8 @@ try {
   check('capture cap does not change process success', capped.ok && capped.exitCode === 0 && capped.processStatus === 'success');
   check('stdout counters distinguish observed, stored, and dropped bytes', capped.stdoutCapture.observedBytes === Buffer.byteLength(stdoutPayload) && capped.stdoutCapture.storedBytes === 1_024 && capped.stdoutCapture.droppedBytes === Buffer.byteLength(stdoutPayload) - 1_024);
   check('stderr has an independent physical cap', capped.stderrCapture.observedBytes === Buffer.byteLength(stderrPayload) && capped.stderrCapture.storedBytes === 1_024 && capped.stderrCapture.droppedBytes === Buffer.byteLength(stderrPayload) - 1_024);
+  check('both streams may each retain the full independent cap', stdoutStoredOnDisk === 1_024 && stderrStoredOnDisk === 1_024 && stdoutStoredOnDisk + stderrStoredOnDisk === 2_048, `${stdoutStoredOnDisk}/${stderrStoredOnDisk}`);
+  check('each stream reserves three quarters for head and one quarter for rolling tail', [capped.stdoutCapture, capped.stderrCapture].every((capture) => capture.headLimit === 768 && capture.tailLimit === 256 && capture.headBytes === 768 && capture.tailBytes === 256));
   check('capture files never exceed either per-stream cap', stdoutStoredOnDisk <= 1_024 && stderrStoredOnDisk <= 1_024, `${stdoutStoredOnDisk}/${stderrStoredOnDisk}`);
   check('retained stdout contains the head and final rolling tail', retainedStdout.startsWith('STDOUT-HEAD-') && retainedStdout.endsWith('-STDOUT-TAIL-DONE'));
   check('retained stderr contains the head and final rolling tail', retainedStderr.startsWith('STDERR-HEAD-') && retainedStderr.endsWith('-STDERR-TAIL-DONE'));
@@ -116,7 +118,7 @@ try {
     language: 'javascript',
     code: 'process.stdout.write("o".repeat(220)); process.stderr.write("🎯".repeat(20));'
   });
-  check('successful hidden stderr still consumes the shared budget', successfulMixed.boundedOutputBytes <= 256 && successfulMixed.stderrTruncated);
+  check('successful hidden stderr still consumes the shared inline-preview budget', successfulMixed.boundedOutputBytes <= 256 && successfulMixed.stderrTruncated);
 
   console.log('\n--- shell source encoding ---');
   const sample = 'Привет, Ёж 🎯';
