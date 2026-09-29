@@ -1,6 +1,6 @@
 /** Production-boundary tests for the DSH DCP compression contract. */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -11,7 +11,10 @@ const { Context } = await import('@deepseek-ai/cordis');
 const { Session, SessionId } = await import('@deepseek-ai/dsh-session');
 const llm = await import('@deepseek-ai/dsh-llm');
 const dcp = await import('../lib/dcp.js');
-const { DcpBlockState } = await import('../lib/dcp-blocks.js');
+const { registerWireTransform } = await import('../lib/edit.js');
+const blockTools = await import('../lib/dcp-blocks.js');
+const { DcpBlockState } = blockTools;
+const { compressionOperationJournalPath } = await import('../lib/dcp-compression-ops.js');
 const placeholders = await import('../lib/dcp-block-placeholders.js');
 
 const failures = [];
@@ -28,15 +31,18 @@ const nextSessionId = () => SessionId(`compress-${process.pid}-${Date.now()}-${+
 const modelText = (session) => JSON.stringify(session.deriveMessages());
 const countOf = (value, needle) => value.split(needle).length - 1;
 
-async function mount(config = {}) {
+async function mount(config = {}, options = {}) {
   const root = new Context();
   const tools = new Map();
-  root.provide('tools', { register(definition) { tools.set(definition.name, definition); return () => {}; } });
-  root.provide('llm', llm);
-  root.provide('tokenMeter', {
+  const sessions = new Map();
+  const meter = options.meter ?? {
     estimateMessage: (message) => JSON.stringify(message?.content ?? message ?? '').length,
     measure: () => ({ nodes: [] })
-  });
+  };
+  root.provide('tools', { register(definition) { tools.set(definition.name, definition); return () => {}; } });
+  root.provide('llm', llm);
+  root.provide('tokenMeter', meter);
+  root.provide('sessions', { get: (id) => sessions.get(String(id)), list: () => [...sessions.values()] });
   const scope = root.plugin(dcp, {
     manualMode: false,
     automaticStrategies: false,
@@ -45,7 +51,7 @@ async function mount(config = {}) {
   });
   scopes.push(scope);
   await new Promise((resolve) => setTimeout(resolve, 150));
-  return { tool: tools.get('compress'), engine: dcp.engineForTest() };
+  return { tool: tools.get('compress'), engine: dcp.engineForTest(), meter, root, sessions };
 }
 
 function appendUser(session, value, source = { kind: 'user' }) {
@@ -115,6 +121,25 @@ function execFor(session) {
 
 function ref(engine, session, event) {
   return engine.boundaryRefAtSeq(session, Number(event.seq));
+}
+
+function requestThrough(instance, session, messages) {
+  instance.sessions.set(String(session.id), session);
+  let seen = messages;
+  let fired = false;
+  const provider = {
+    stream(request) {
+      fired = true;
+      seen = request.messages;
+      return request;
+    }
+  };
+  instance.root.waterfall(provider, 'llm/stream', { sessionId: String(session.id), messages }, (request) => provider.stream(request));
+  return { seen, fired };
+}
+
+function wireStatuses(messages) {
+  return JSON.stringify(messages).match(/<dcp-status>DCP-finalized message estimate: [^<]+<\/dcp-status>/g) ?? [];
 }
 
 async function compressRange(instance, fixtureValue, start, end, summary, topic = 'Closed work') {
@@ -219,6 +244,19 @@ try {
     { startId: batchTail, endId: batchTail, summary: 'BATCH-TAIL' }
   ] }, execFor(batch.session));
   check('non-overlapping ranges batch in one call', batchValue.compressed === true && batchValue.blocks.length === 2 && batchValue.compressedMessages === 2);
+  const mixedLineage = await compressRange(standard, batch, 'b1', 'b2', 'KEEP (b1), absorb the other predecessor', 'Mixed lineage telemetry');
+  check('aggregate lineage telemetry distinguishes mixed children', mixedLineage.preservedBlocks === 1 && mixedLineage.absorbedBlocks === 1, JSON.stringify(mixedLineage));
+  check('compression estimate telemetry is finite and arithmetically exact', [mixedLineage.beforeEstimate, mixedLineage.afterEstimate, mixedLineage.estimatedFreed].every(Number.isFinite)
+    && mixedLineage.estimatedFreed === mixedLineage.beforeEstimate - mixedLineage.afterEstimate, JSON.stringify(mixedLineage));
+  const telemetryFields = ['preservedBlocks', 'absorbedBlocks', 'beforeEstimate', 'afterEstimate', 'estimatedFreed'];
+  const requiredOutputFields = standard.tool.output.schema.required ?? [];
+  check('aggregate telemetry is required by the tool output schema', telemetryFields.every((field) => standard.tool.output.schema.properties[field]?.type === 'integer'
+    && (standard.tool.output.schema.properties[field].required === true || requiredOutputFields.includes(field))), JSON.stringify(standard.tool.output.schema));
+  const mixedRendered = standard.tool.output.render({}, mixedLineage).map((part) => part.text).join('');
+  check('aggregate telemetry is visible in the rendered tool result', mixedRendered.includes('1 preserved, 1 absorbed')
+    && mixedRendered.includes(`${mixedLineage.beforeEstimate} before`)
+    && mixedRendered.includes(`${mixedLineage.afterEstimate} after`)
+    && mixedRendered.includes(`${mixedLineage.estimatedFreed} freed`), mixedRendered);
 
   const multiCalls = [
     { id: 'multi-1', name: 'read', args: { filePath: 'a.js' } },
@@ -271,6 +309,29 @@ try {
   check('a late legacy marker rejects the entire batch with exact guidance', lateError?.message === 'Use canonical (bN) instead of {block_N}', lateError?.message);
   check('a late-row failure has zero durable or registry side effects', JSON.stringify(lateRow.session.snapshotEvents()) === lateBeforeEvents && JSON.stringify(standard.engine.blocksFor(lateRow.session).toJSON()) === lateBeforeState);
 
+  const freshLate = fixture();
+  const freshUserId = ref(standard.engine, freshLate.session, freshLate.user);
+  const freshTailId = ref(standard.engine, freshLate.session, freshLate.tail);
+  const freshStatePath = join(testHome, 'context-kit', 'dcp-state', `${String(freshLate.session.id)}.json`);
+  const freshJournalPath = compressionOperationJournalPath(freshLate.session.id);
+  // Addressing is established before the baseline. Removing its persisted copy
+  // makes any write performed by the rejected batch directly observable.
+  rmSync(freshStatePath, { force: true });
+  const freshBeforeState = JSON.stringify(standard.engine.blocksFor(freshLate.session).toJSON());
+  const freshEvents = JSON.stringify(freshLate.session.snapshotEvents());
+  let freshLateError;
+  try {
+    await standard.tool.execute({ topic: 'fresh atomic preflight', content: [
+      { startId: freshUserId, endId: freshUserId, summary: 'VALID-FIRST-ROW' },
+      { startId: freshTailId, endId: freshTailId, summary: 'legacy {block_1}' }
+    ] }, execFor(freshLate.session));
+  } catch (error) { freshLateError = error; }
+  const freshAfter = standard.engine.blocksFor(freshLate.session);
+  check('a fresh late failure allocates no permit, id, state file, journal, or log entry', freshLateError?.message === 'Use canonical (bN) instead of {block_N}'
+    && JSON.stringify(freshAfter.toJSON()) === freshBeforeState
+    && !existsSync(freshStatePath) && !existsSync(freshJournalPath)
+    && JSON.stringify(freshLate.session.snapshotEvents()) === freshEvents, freshLateError?.message ?? JSON.stringify(freshAfter.toJSON()));
+
   console.log('\n--- protected outputs use patterns and call-id binding ---');
   const protectedInstance = await mount({
     compress: { protectedTools: ['keep_exact', 'mcp_*'] },
@@ -306,7 +367,9 @@ try {
   };
   const renderedValue = await standard.tool.execute(renderedArgs, execFor(renderedFixture.session));
   const rendered = standard.tool.output.render(renderedArgs, renderedValue).map((part) => part.text).join('');
-  check('successful output matches upstream wording', rendered === 'Compressed 1 messages into [Compressed conversation section].', rendered);
+  check('successful output retains upstream wording and adds bounded telemetry', rendered.startsWith('Compressed 1 messages into [Compressed conversation section].')
+    && rendered.includes('Predecessor blocks: 0 preserved, 0 absorbed.')
+    && /Estimated tokens for compressed spans: \d+ before, \d+ after, -?\d+ freed\./.test(rendered), rendered);
   check('successful output exposes no internal seq values', !/seq|range \d|shadowed/i.test(rendered), rendered);
 
   const messageMode = await mount({ compress: { mode: 'message' } });
@@ -322,6 +385,60 @@ try {
 
   const denied = await mount({ compress: { permission: 'deny' } });
   check('permission deny removes the tool', denied.tool === undefined);
+
+  console.log('\n--- finalized wire estimate status ---');
+  const wire = await mount();
+  const wireFixture = fixture();
+  const outgoing = wireFixture.session.snapshotEvents()
+    .map((event) => wireFixture.session.deriveEventMessage(event))
+    .filter((message) => message !== null);
+  const disposeEditor = registerWireTransform(wire.root, (messages) => messages.map((message, index) => {
+    if (index !== messages.length - 1 || message?.role !== 'user') return message;
+    return {
+      ...message,
+      content: message.content.map((part) => part?.type === 'text' ? { ...part, text: `${part.text}\nEDITOR-STAGE-100` } : part)
+    };
+  }), { order: 100 });
+  const firstWire = requestThrough(wire, wireFixture.session, outgoing);
+  const firstCache = wire.engine.wireEstimateFor(wireFixture.session);
+  const secondWire = requestThrough(wire, wireFixture.session, firstWire.seen);
+  disposeEditor();
+  const firstStatuses = wireStatuses(firstWire.seen);
+  const secondStatuses = wireStatuses(secondWire.seen);
+  const terminalUserText = [...firstWire.seen].reverse().find((message) => message?.role === 'user')?.content
+    ?.filter((part) => part?.type === 'text').at(-1)?.text ?? '';
+  const statusFreeWire = dcp.stripDcpWireStatuses(firstWire.seen).messages;
+  const independentlyMeasured = statusFreeWire.reduce((total, message) => total + wire.meter.estimateMessage(message), 0);
+  check('DCP status runs after ordinary editor and DCP transforms', firstWire.fired && terminalUserText.includes('EDITOR-STAGE-100') && terminalUserText.includes('<dcp-message-id>'));
+  check('the provider-bound copy contains exactly one bounded estimate status', firstStatuses.length === 1
+    && firstStatuses[0].includes('DCP-finalized message estimate: ~')
+    && firstStatuses[0].length <= dcp.DCP_WIRE_STATUS_MAX_CHARS, firstStatuses.join('\n'));
+  check('the wire status preserves the terminal DCP message id', /<dcp-status>DCP-finalized message estimate: ~\d+ tokens<\/dcp-status>\n<dcp-message-id>m\d{4,5}<\/dcp-message-id>\s*$/.test(terminalUserText), terminalUserText);
+  check('prior wire status is replaced instead of accumulated', secondWire.fired && secondStatuses.length === 1, JSON.stringify(secondStatuses));
+  check('wire measurement excludes the prior status and prices one final status', firstCache?.statusFreeEstimate === independentlyMeasured
+    && firstCache?.finalizedEstimate === firstWire.seen.reduce((total, message) => total + wire.meter.estimateMessage(message), 0)
+    && firstCache?.statusCost === firstCache.finalizedEstimate - firstCache.statusFreeEstimate, JSON.stringify({ firstCache, independentlyMeasured, visibleMeasured: firstWire.seen.reduce((total, message) => total + wire.meter.estimateMessage(message), 0) }));
+  check('wire-only status never enters durable session history', !JSON.stringify(wireFixture.session.snapshotEvents()).includes('<dcp-status>'));
+
+  const noUser = requestThrough(wire, wireFixture.session, [{ role: 'system', content: [{ type: 'text', text: 'system only' }] }]);
+  check('no user text means no synthetic visible status message', noUser.fired && wireStatuses(noUser.seen).length === 0
+    && noUser.seen.length === 1 && noUser.seen[0].role === 'system' && wire.engine.wireEstimateFor(wireFixture.session)?.visible === false);
+
+  const fallback = await mount({}, {
+    meter: {
+      estimateMessage: () => Number.NaN,
+      measure: () => ({ nodes: [] })
+    }
+  });
+  const fallbackFixture = fixture();
+  const fallbackOutgoing = fallbackFixture.session.snapshotEvents()
+    .map((event) => fallbackFixture.session.deriveEventMessage(event))
+    .filter((message) => message !== null);
+  const fallbackWire = requestThrough(fallback, fallbackFixture.session, fallbackOutgoing);
+  const fallbackStatuses = wireStatuses(fallbackWire.seen);
+  check('unavailable measurement uses an explicit bounded estimate fallback', fallbackWire.fired && fallbackStatuses.length === 1
+    && fallbackStatuses[0] === '<dcp-status>DCP-finalized message estimate: unavailable</dcp-status>'
+    && fallbackStatuses[0].length <= dcp.DCP_WIRE_STATUS_MAX_CHARS, fallbackStatuses.join('\n'));
 
   console.log('\n--- durable landing fault reconciliation ---');
   for (const phase of ['planned', 'prune_landed', 'replacement_landed', 'registry_persisted', 'committed']) {
@@ -365,6 +482,36 @@ try {
     reconcileError?.message ?? JSON.stringify({ persisted: operation?.phase, prunes: prunes.length, replacements: replacements.length }));
   }
 
+  console.log('\n--- current top-level tool-result compatibility ---');
+  const currentToolResult = Object.freeze({
+    id: 'tool-message-current',
+    role: 'tool',
+    toolCallId: 'current-call',
+    isError: false,
+    source: Object.freeze({ kind: 'tool', callId: 'current-call' }),
+    content: Object.freeze([{ type: 'text', text: 'CURRENT-OUTPUT' }]),
+    providerField: 'preserve-me'
+  });
+  const directlyPruned = blockTools.prunedToolResultMessage(currentToolResult, 'CURRENT-PLACEHOLDER');
+  check('current top-level tool result is immutably replaced with identity intact', directlyPruned !== currentToolResult
+    && directlyPruned.id === currentToolResult.id
+    && directlyPruned.role === 'tool'
+    && directlyPruned.toolCallId === currentToolResult.toolCallId
+    && directlyPruned.isError === currentToolResult.isError
+    && JSON.stringify(directlyPruned.source) === JSON.stringify(currentToolResult.source)
+    && directlyPruned.providerField === currentToolResult.providerField
+    && directlyPruned.content?.[0]?.text === 'CURRENT-PLACEHOLDER'
+    && currentToolResult.content[0].text === 'CURRENT-OUTPUT', JSON.stringify(directlyPruned));
+  const currentPruneState = new DcpBlockState();
+  currentPruneState.pruneTools([{ callId: 'current-call', tokens: 10, kind: 'output' }]);
+  const currentPrunedList = blockTools.applyToolPruning([{
+    id: 'assistant-current', role: 'assistant', content: [{ type: 'tool-call', id: 'current-call', name: 'read', arguments: '{}' }]
+  }, currentToolResult], currentPruneState);
+  check('tool-output pruning recognizes the current top-level result shape', currentPrunedList[1] !== currentToolResult
+    && currentPrunedList[1].content?.[0]?.text === blockTools.PRUNED_TOOL_OUTPUT_REPLACEMENT
+    && currentPrunedList[1].toolCallId === 'current-call'
+    && currentPrunedList[1].providerField === 'preserve-me', JSON.stringify(currentPrunedList[1]));
+
   console.log('\n--- placeholder unit falsification ---');
   const selected = [{ blockId: 1, summary: placeholders.wrapBlockSummary(1, 'SAVED'), active: true }];
   const registry = [
@@ -403,6 +550,10 @@ try {
   });
   const migrated = legacyState.get('9');
   check('legacy lineage migrates conservatively to preserved children', JSON.stringify(migrated.childBlockIds) === '["1","2"]' && JSON.stringify(migrated.preservedBlockIds) === '["1","2"]' && JSON.stringify(migrated.absorbedBlockIds) === '[]' && migrated.lineageSemantics === 'legacy-unknown', JSON.stringify(migrated));
+  const migratedAgain = new DcpBlockState(new DcpBlockState(legacyState.toJSON()).toJSON()).get('9');
+  check('legacy-unknown lineage survives a second persistence round trip', migratedAgain?.lineageSemantics === 'legacy-unknown'
+    && JSON.stringify(migratedAgain.preservedBlockIds) === '["1","2"]'
+    && JSON.stringify(migratedAgain.absorbedBlockIds) === '[]', JSON.stringify(migratedAgain));
 } finally {
   for (const scope of scopes.reverse()) await scope.dispose();
   rmSync(testHome, { recursive: true, force: true });
