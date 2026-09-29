@@ -10,6 +10,7 @@ import * as llm from '@deepseek-ai/dsh-llm';
 import { createScope } from '@deepseek-ai/dsh-scope';
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import ToolRuntime from '@deepseek-ai/dsh-tools';
+import { toolResultOf } from '../lib/session.js';
 
 const home = mkdtempSync(join(tmpdir(), 'dcp-review-gaps-'));
 process.env.DSH_HOME = home;
@@ -398,7 +399,7 @@ try {
     const errorAssistantMessage = sent.messages.find((message) => String(message.id) === String(errorAssistant.data.message.id));
     const errorResultMessage = sent.messages.find((message) => String(message.id) === String(errorResult.data.message.id));
     assert.match(allText([errorAssistantMessage]), new RegExp(`<dcp-message-id>${errorRef}<`));
-    const providerDiagnostic = errorResultMessage.content[0].content.find((part) => part.type === 'text').text;
+    const providerDiagnostic = toolResultOf(errorResultMessage).content.find((part) => part.type === 'text').text;
     assert.equal(providerDiagnostic, failedDiagnostic);
     assert.equal(JSON.stringify(session.snapshotEvents()), logBefore);
     assert.equal(JSON.stringify(session.deriveMessages()), derivedBefore);
@@ -598,7 +599,7 @@ try {
       const target = sent.messages.find((message) => String(message.id) === String(targetId));
       assert.match(allText([target]), /Evaluate the conversation for compressible ranges/);
       const callPart = sent.messages.flatMap((message) => message.content ?? []).find((part) => part.type === 'tool-call');
-      const resultPart = sent.messages.flatMap((message) => message.content ?? []).find((part) => part.type === 'tool-result');
+      const resultPart = sent.messages.map(toolResultOf).find(Boolean);
       assert.equal(callPart.id, resultPart.toolCallId);
     }
 
