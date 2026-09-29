@@ -11,6 +11,7 @@ const { Context } = await import('@deepseek-ai/cordis');
 const { Session, SessionId } = await import('@deepseek-ai/dsh-session');
 const llm = await import('@deepseek-ai/dsh-llm');
 const dcp = await import('../lib/dcp.js');
+const { DcpBlockState } = await import('../lib/dcp-blocks.js');
 const placeholders = await import('../lib/dcp-block-placeholders.js');
 
 const failures = [];
@@ -195,8 +196,8 @@ try {
   let overlapError;
   try {
     await standard.tool.execute({ topic: 'overlap', content: [
-      { startId: overlapUser, endId: overlapAssistant, summary: 'first' },
-      { startId: overlapAssistant, endId: overlapTail, summary: 'second' }
+      { startId: overlapUser, endId: overlapTail, summary: 'first' },
+      { startId: overlapTail, endId: overlapTail, summary: 'second' }
     ] }, execFor(overlap.session));
   } catch (error) { overlapError = error; }
   check('overlapping alias ranges are rejected before writes', /overlaps content\[1\].*Overlapping ranges cannot be compressed in the same batch/.test(overlapError?.message ?? '')
@@ -226,56 +227,49 @@ try {
   const toolOnly = fixture({ calls: multiCalls, outputs: [[multiCalls[0], 'MULTI-ONE'], [multiCalls[1], 'MULTI-TWO']] });
   const assistantAlias = ref(standard.engine, toolOnly.session, toolOnly.assistant);
   check('both completed tool outputs resolve to the assistant alias', toolOnly.results.every((event) => ref(standard.engine, toolOnly.session, event) === assistantAlias), assistantAlias);
-  const toolOnlyValue = await compressRange(standard, toolOnly, assistantAlias, assistantAlias, 'ASSISTANT-WITH-TOOLS-SUMMARY');
+  const toolOnlyValue = await compressRange(standard, toolOnly, toolOnly.user, toolOnly.tail, 'ASSISTANT-WITH-TOOLS-SUMMARY');
   const toolOnlyView = modelText(toolOnly.session);
   check('one assistant ID compresses its message and every completed tool result', toolOnlyValue.compressed === true && !toolOnlyView.includes('MULTI-ONE') && !toolOnlyView.includes('MULTI-TWO'), toolOnlyView);
   check('the compressed transcript has no orphaned selected tool pair', !toolOnlyView.includes('multi-1') && !toolOnlyView.includes('multi-2'));
 
   console.log('\n--- exact block wrapper and bN boundaries ---');
   const boundary = fixture();
-  const first = await compressRange(standard, boundary, boundary.assistant, boundary.assistant, 'FIRST-BLOCK');
+  const first = await compressRange(standard, boundary, boundary.user, boundary.user, 'FIRST-BLOCK');
   check('the first compression lands as b1', first.blocks[0]?.blockId === '1');
   const exactWrapper = '[Compressed conversation section]\nFIRST-BLOCK\n\n<dcp-message-id>b1</dcp-message-id>';
   check('the durable replacement wrapper is exact', standard.engine.blocksFor(boundary.session).get('1')?.summary === exactWrapper, JSON.stringify(standard.engine.blocksFor(boundary.session).get('1')?.summary));
-  const boundaryValue = await compressRange(standard, boundary, 'b1', ref(standard.engine, boundary.session, boundary.tail), 'AFTER-BOUNDARY');
+  const boundaryValue = await compressRange(standard, boundary, 'b1', 'b1', 'AFTER-BOUNDARY');
   const boundaryText = modelText(boundary.session);
   check('bN can be a range boundary', boundaryValue.compressed === true, boundaryValue.reason ?? '');
-  check('an omitted start-boundary block is inserted before the new summary', boundaryText.indexOf('FIRST-BLOCK') < boundaryText.indexOf('AFTER-BOUNDARY'));
-  check('the consumed block is inactive and the new block is active', standard.engine.blocksFor(boundary.session).get('1')?.active === false && standard.engine.blocksFor(boundary.session).active().length === 1);
+  check('an omitted selected predecessor is absorbed without hidden append', !boundaryText.includes('FIRST-BLOCK') && boundaryText.includes('AFTER-BOUNDARY'), boundaryText);
+  check('absorbed lineage is complete', JSON.stringify(boundaryValue.blocks[0]) === JSON.stringify({
+    ...boundaryValue.blocks[0],
+    childBlockIds: ['1'], preservedBlockIds: [], absorbedBlockIds: ['1']
+  }) && standard.engine.blocksFor(boundary.session).get('1')?.active === false);
 
   const blockOnly = fixture();
-  await compressRange(standard, blockOnly, blockOnly.assistant, blockOnly.assistant, 'BLOCK-ONLY-FIRST');
-  const blockOnlyValue = await compressRange(standard, blockOnly, 'b1', 'b1', 'BLOCK-ONLY-SECOND');
+  await compressRange(standard, blockOnly, blockOnly.user, blockOnly.user, 'BLOCK-ONLY-FIRST');
+  const blockOnlyValue = await compressRange(standard, blockOnly, 'b1', 'b1', 'before (b1) after');
+  const blockOnlyText = modelText(blockOnly.session);
   check('startId=endId is accepted for a compressed block boundary', blockOnlyValue.compressed === true, blockOnlyValue.reason ?? '');
-  check('a block-only replacement carries the old block exactly once', countOf(modelText(blockOnly.session), 'BLOCK-ONLY-FIRST') === 1);
+  check('one canonical marker preserves the old block exactly at that location', blockOnlyText.indexOf('before') < blockOnlyText.indexOf('BLOCK-ONLY-FIRST') && blockOnlyText.indexOf('BLOCK-ONLY-FIRST') < blockOnlyText.indexOf('after') && countOf(blockOnlyText, 'BLOCK-ONLY-FIRST') === 1, blockOnlyText);
+  check('preserved lineage is complete', JSON.stringify(blockOnlyValue.blocks[0].childBlockIds) === '["1"]' && JSON.stringify(blockOnlyValue.blocks[0].preservedBlockIds) === '["1"]' && JSON.stringify(blockOnlyValue.blocks[0].absorbedBlockIds) === '[]');
 
-  console.log('\n--- placeholder consume, remove, and append semantics ---');
-  const inner = fixture();
-  await compressRange(standard, inner, inner.assistant, inner.assistant, 'INNER-FACT');
-  const outerValue = await compressRange(
-    standard,
-    inner,
-    ref(standard.engine, inner.session, inner.user),
-    ref(standard.engine, inner.session, inner.tail),
-    'before (b1) after duplicate (b1) unknown (b99)'
-  );
-  const outerText = modelText(inner.session);
-  check('a selected inner placeholder expands its saved summary', outerText.includes('INNER-FACT') && outerValue.blocks[0].consumedBlockIds.includes('1'));
-  check('duplicate and unknown placeholder literals remain untouched', countOf(outerText, '(b1)') === 1 && outerText.includes('(b99)'), outerText);
-  check('expanded block content appears exactly once', countOf(outerText, 'INNER-FACT') === 1, String(countOf(outerText, 'INNER-FACT')));
-
-  const omitted = fixture();
-  await compressRange(standard, omitted, omitted.assistant, omitted.assistant, 'OMITTED-INNER-FACT');
-  const omittedValue = await compressRange(
-    standard,
-    omitted,
-    ref(standard.engine, omitted.session, omitted.user),
-    ref(standard.engine, omitted.session, omitted.tail),
-    'OUTER-WITHOUT-PLACEHOLDER'
-  );
-  const omittedText = modelText(omitted.session);
-  check('an omitted selected inner block is appended', omittedText.includes('The following previously compressed summaries were also part of this conversation section:') && omittedText.includes('### (b1)') && omittedText.includes('OMITTED-INNER-FACT'), omittedText);
-  check('the append is reported and consumes the old block', JSON.stringify(omittedValue.blocks[0].appendedBlockIds) === '["1"]' && omittedValue.blocks[0].consumedBlockIds.includes('1'));
+  console.log('\n--- strict canonical placeholder semantics ---');
+  const lateRow = fixture();
+  const lateUser = ref(standard.engine, lateRow.session, lateRow.user);
+  const lateTail = ref(standard.engine, lateRow.session, lateRow.tail);
+  const lateBeforeEvents = JSON.stringify(lateRow.session.snapshotEvents());
+  const lateBeforeState = JSON.stringify(standard.engine.blocksFor(lateRow.session).toJSON());
+  let lateError;
+  try {
+    await standard.tool.execute({ topic: 'atomic preflight', content: [
+      { startId: lateUser, endId: lateUser, summary: 'VALID-FIRST-ROW' },
+      { startId: lateTail, endId: lateTail, summary: 'legacy {block_1}' }
+    ] }, execFor(lateRow.session));
+  } catch (error) { lateError = error; }
+  check('a late legacy marker rejects the entire batch with exact guidance', lateError?.message === 'Use canonical (bN) instead of {block_N}', lateError?.message);
+  check('a late-row failure has zero durable or registry side effects', JSON.stringify(lateRow.session.snapshotEvents()) === lateBeforeEvents && JSON.stringify(standard.engine.blocksFor(lateRow.session).toJSON()) === lateBeforeState);
 
   console.log('\n--- protected outputs use patterns and call-id binding ---');
   const protectedInstance = await mount({
@@ -297,7 +291,7 @@ try {
       [calls[1], 'WILDCARD-OUTPUT']
     ]
   });
-  const protectedValue = await compressRange(protectedInstance, protectedFixture, protectedFixture.assistant, protectedFixture.assistant, 'PROTECTED-SUMMARY');
+  const protectedValue = await compressRange(protectedInstance, protectedFixture, protectedFixture.user, protectedFixture.tail, 'PROTECTED-SUMMARY');
   const protectedSummary = protectedInstance.engine.blocksFor(protectedFixture.session).get(protectedValue.blocks[0].blockId)?.summary ?? '';
   check('exact protected tool output is bound by call id', protectedSummary.includes('### Tool: keep_exact\nEXACT-OUTPUT'));
   check('wildcard protected tool output is preserved', protectedSummary.includes('### Tool: mcp_fetch\nWILDCARD-OUTPUT'));
@@ -330,16 +324,43 @@ try {
   check('permission deny removes the tool', denied.tool === undefined);
 
   console.log('\n--- placeholder unit falsification ---');
-  const lookup = new Map([[1, placeholders.wrapBlockSummary(1, 'SAVED')]]);
-  const parsed = placeholders.parseBlockPlaceholders('(b1) duplicate (b1) unknown (b9)');
-  const startReference = { kind: 'message', ref: 'm0001' };
-  const endReference = { kind: 'message', ref: 'm0002' };
-  const missing = placeholders.validateSummaryPlaceholders(parsed, [1], startReference, endReference, lookup);
-  const injected = placeholders.injectBlockPlaceholders('(b1) duplicate (b1) unknown (b9)', parsed, lookup, startReference, endReference);
-  check('validation keeps one selected placeholder and no missing IDs', parsed.length === 1 && parsed[0].blockId === 1 && missing.length === 0);
-  check('injection expands the validated first placeholder and leaves filtered literals', injected.expandedSummary.includes('SAVED') && countOf(injected.expandedSummary, '(b1)') === 1 && injected.expandedSummary.includes('(b9)'), injected.expandedSummary);
-  const deletingInvalid = injected.expandedSummary.replace(/\(b\d+\)/g, '');
-  check('deleting filtered placeholder literals WOULD fail upstream parity', !deletingInvalid.includes('(b9)'));
+  const selected = [{ blockId: 1, summary: placeholders.wrapBlockSummary(1, 'SAVED'), active: true }];
+  const registry = [
+    ...selected,
+    { blockId: 2, summary: placeholders.wrapBlockSummary(2, 'OUTSIDE'), active: true },
+    { blockId: 3, summary: placeholders.wrapBlockSummary(3, 'INACTIVE'), active: false }
+  ];
+  const classified = placeholders.classifyAndExpandBlockPlaceholders('left (b1) right', { selectedBlocks: selected, registry });
+  check('one canonical placeholder expands exactly in place', classified.expandedSummary === 'left SAVED right' && JSON.stringify(classified.childBlockIds) === '[1]' && JSON.stringify(classified.preservedBlockIds) === '[1]' && JSON.stringify(classified.absorbedBlockIds) === '[]', JSON.stringify(classified));
+  const absorbed = placeholders.classifyAndExpandBlockPlaceholders('replacement only', { selectedBlocks: selected, registry });
+  check('omitting a selected predecessor is legal absorption', absorbed.expandedSummary === 'replacement only' && JSON.stringify(absorbed.childBlockIds) === '[1]' && JSON.stringify(absorbed.preservedBlockIds) === '[]' && JSON.stringify(absorbed.absorbedBlockIds) === '[1]', JSON.stringify(absorbed));
+
+  const strictCases = [
+    ['legacy', '{block_1}', 'Use canonical (bN) instead of {block_N}'],
+    ['duplicate', '(b1) then (b1)', 'Duplicate block placeholder (b1). Include a selected block at most once.'],
+    ['unknown', '(b99)', 'Unknown block placeholder (b99).'],
+    ['inactive', '(b3)', 'Inactive block placeholder (b3) cannot be preserved.'],
+    ['out-of-range', '(b2)', 'Block placeholder (b2) is outside the selected compression range.'],
+    ['malformed zero', '(b0)', 'Malformed block placeholder "(b0)". Use canonical (bN).'],
+    ['malformed leading zero', '(b01)', 'Malformed block placeholder "(b01)". Use canonical (bN).'],
+    ['malformed missing close', '(b1', 'Malformed block placeholder "(b1". Use canonical (bN).']
+  ];
+  for (const [name, summary, expected] of strictCases) {
+    let error;
+    try { placeholders.classifyAndExpandBlockPlaceholders(summary, { selectedBlocks: selected, registry }); } catch (caught) { error = caught; }
+    check(`${name} marker rejects preflight`, error?.message === expected, error?.message);
+  }
+
+  const legacyState = new DcpBlockState({
+    version: 3,
+    blocks: [{
+      blockId: '9', summary: placeholders.wrapBlockSummary(9, 'LEGACY'),
+      anchorMessageId: 'legacy-anchor', shadowedMessageIds: ['legacy-anchor'], shadowedSeqs: [9],
+      consumedBlockIds: ['1'], appendedBlockIds: ['2'], active: true
+    }]
+  });
+  const migrated = legacyState.get('9');
+  check('legacy lineage migrates conservatively to preserved children', JSON.stringify(migrated.childBlockIds) === '["1","2"]' && JSON.stringify(migrated.preservedBlockIds) === '["1","2"]' && JSON.stringify(migrated.absorbedBlockIds) === '[]' && migrated.lineageSemantics === 'legacy-unknown', JSON.stringify(migrated));
 } finally {
   for (const scope of scopes.reverse()) await scope.dispose();
   rmSync(testHome, { recursive: true, force: true });
