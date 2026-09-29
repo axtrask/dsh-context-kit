@@ -323,6 +323,48 @@ try {
   const denied = await mount({ compress: { permission: 'deny' } });
   check('permission deny removes the tool', denied.tool === undefined);
 
+  console.log('\n--- durable landing fault reconciliation ---');
+  for (const phase of ['planned', 'prune_landed', 'replacement_landed', 'registry_persisted', 'committed']) {
+    const crash = fixture();
+    standard.engine.setCompressionFaultInjector((landedPhase) => {
+      if (landedPhase === phase) throw new Error(`injected crash at ${phase}`);
+    });
+    let crashError;
+    try {
+      await compressRange(standard, crash, crash.user, crash.user, `RECOVER-${phase}`);
+    } catch (error) {
+      crashError = error;
+    } finally {
+      standard.engine.setCompressionFaultInjector(undefined);
+    }
+    const crashedJournal = standard.engine.compressionJournal(crash.session);
+    const operation = crashedJournal.operations()[0];
+    const phasePersisted = operation?.phase === phase;
+    const restarted = await mount();
+    let reconcileError;
+    try {
+      restarted.engine.reconcileCompressionOperations(crash.session);
+      restarted.engine.reconcileCompressionOperations(crash.session);
+    } catch (error) {
+      reconcileError = error;
+    }
+    const journal = restarted.engine.compressionJournal(crash.session);
+    const prunes = crash.session.snapshotEvents().filter((event) => event.type === 'compaction/prune' && event.data?.dcpOperationId === operation?.operationId);
+    const replacements = crash.session.snapshotEvents().filter((event) => event.type === 'user/message' && event.data?.source?.dcpOperationId === operation?.operationId);
+    const recoveredBlock = restarted.engine.blocksFor(crash.session).get(operation?.blockId);
+    check(`fault at ${phase} reconciles exactly once after restart`,
+      crashError?.message === `injected crash at ${phase}`
+      && phasePersisted
+      && reconcileError === undefined
+      && journal.get(operation.operationId)?.phase === 'committed'
+      && prunes.length === 1
+      && replacements.length === 1
+      && Number(replacements[0].seq) === Number(prunes[0].seq) + 1
+      && recoveredBlock?.operationId === operation.operationId
+      && restarted.engine.blocksFor(crash.session).stats.compressions === 1,
+    reconcileError?.message ?? JSON.stringify({ persisted: operation?.phase, prunes: prunes.length, replacements: replacements.length }));
+  }
+
   console.log('\n--- placeholder unit falsification ---');
   const selected = [{ blockId: 1, summary: placeholders.wrapBlockSummary(1, 'SAVED'), active: true }];
   const registry = [
