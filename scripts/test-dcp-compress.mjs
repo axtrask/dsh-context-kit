@@ -1,10 +1,11 @@
 /** Production-boundary tests for the DSH DCP compression contract. */
 
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const testHome = mkdtempSync(join(tmpdir(), 'dsh-dcp-compress-'));
+const temporaryHomes = [testHome];
 process.env.DSH_HOME = testHome;
 
 const { Context } = await import('@deepseek-ai/cordis');
@@ -30,6 +31,25 @@ const text = (value) => ({ type: 'text', text: value });
 const nextSessionId = () => SessionId(`compress-${process.pid}-${Date.now()}-${++sessionCounter}`);
 const modelText = (session) => JSON.stringify(session.deriveMessages());
 const countOf = (value, needle) => value.split(needle).length - 1;
+
+function recursiveFileSnapshot(root) {
+  const entries = [];
+  const walk = (directory, prefix = '') => {
+    if (!existsSync(directory)) return;
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const relative = prefix.length === 0 ? entry.name : `${prefix}/${entry.name}`;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        entries.push(`d:${relative}`);
+        walk(path, relative);
+      } else if (entry.isFile()) {
+        entries.push(`f:${relative}:${readFileSync(path).toString('base64')}`);
+      }
+    }
+  };
+  walk(root);
+  return JSON.stringify(entries);
+}
 
 async function mount(config = {}, options = {}) {
   const root = new Context();
@@ -191,6 +211,128 @@ try {
     try { await standard.tool.execute(args, execFor(sample.session)); } catch (error) { message = error.message; }
     check(expected, message === expected, message);
   }
+
+  console.log('\n--- zero-effect whole-batch preflight ---');
+  const isolatedHome = mkdtempSync(join(tmpdir(), 'dsh-dcp-preflight-'));
+  temporaryHomes.push(isolatedHome);
+  const priorHome = process.env.DSH_HOME;
+  process.env.DSH_HOME = isolatedHome;
+  try {
+    const isolated = await mount();
+    const firstTouch = fixture();
+    firstTouch.session.append('compaction/end', { turn: 1, ok: true });
+    const firstTouchBeforeFiles = recursiveFileSnapshot(isolatedHome);
+    const firstTouchBeforeEvents = JSON.stringify(firstTouch.session.snapshotEvents());
+    let firstTouchError;
+    try {
+      await isolated.tool.execute({
+        topic: 'Semantic invalid first-touch batch',
+        content: [{ startId: 'm0001', endId: 'm0001', summary: 'must not run' }]
+      }, execFor(firstTouch.session));
+    } catch (error) {
+      firstTouchError = error;
+    }
+    const firstTouchSessionId = String(firstTouch.session.id);
+    check('semantic first-touch failure after native compaction has zero side effects',
+      /startId m0001 is not available/.test(firstTouchError?.message ?? '')
+      && recursiveFileSnapshot(isolatedHome) === firstTouchBeforeFiles
+      && JSON.stringify(firstTouch.session.snapshotEvents()) === firstTouchBeforeEvents
+      && isolated.engine._blocksBySession?.has(firstTouchSessionId) !== true
+      && isolated.engine._compressionJournals.has(firstTouchSessionId) !== true,
+    firstTouchError?.message ?? recursiveFileSnapshot(isolatedHome));
+
+    const pending = fixture();
+    const pendingAlias = ref(isolated.engine, pending.session, pending.user);
+    isolated.engine.setCompressionFaultInjector((phase) => {
+      if (phase === 'planned') throw new Error('leave pending preflight operation');
+    });
+    let plannedError;
+    try {
+      await compressRange(isolated, pending, pendingAlias, pendingAlias, 'PENDING-PREFLIGHT');
+    } catch (error) {
+      plannedError = error;
+    } finally {
+      isolated.engine.setCompressionFaultInjector(undefined);
+    }
+    const pendingJournal = isolated.engine.compressionJournal(pending.session);
+    const pendingOperation = pendingJournal.operations()[0];
+    const pendingBeforeFiles = recursiveFileSnapshot(isolatedHome);
+    const pendingBeforeEvents = JSON.stringify(pending.session.snapshotEvents());
+    const pendingBeforeState = JSON.stringify(isolated.engine.blocksFor(pending.session).toJSON());
+    let pendingInvalidError;
+    try {
+      await isolated.tool.execute({
+        topic: 'Late invalid pending batch',
+        content: [
+          { startId: pendingAlias, endId: pendingAlias, summary: 'valid detached plan' },
+          { startId: 'm9999', endId: 'm9999', summary: 'must not run' }
+        ]
+      }, execFor(pending.session));
+    } catch (error) {
+      pendingInvalidError = error;
+    }
+    check('late-invalid semantic input cannot reconcile or land a pending planned operation',
+      plannedError?.message === 'leave pending preflight operation'
+      && /startId m9999 is not available/.test(pendingInvalidError?.message ?? '')
+      && pendingOperation?.phase === 'planned'
+      && pendingJournal.get(pendingOperation?.operationId)?.phase === 'planned'
+      && recursiveFileSnapshot(isolatedHome) === pendingBeforeFiles
+      && JSON.stringify(pending.session.snapshotEvents()) === pendingBeforeEvents
+      && JSON.stringify(isolated.engine.blocksFor(pending.session).toJSON()) === pendingBeforeState,
+    pendingInvalidError?.message ?? JSON.stringify(pendingJournal.operations()));
+  } finally {
+    process.env.DSH_HOME = priorHome;
+  }
+
+  console.log('\n--- post-reconcile stale-plan guards ---');
+  const changedReservation = await mount();
+  const changedReservationFixture = fixture();
+  const changedReservationAlias = ref(changedReservation.engine, changedReservationFixture.session, changedReservationFixture.user);
+  const changedReservationBeforeEvents = JSON.stringify(changedReservationFixture.session.snapshotEvents());
+  const reconcileBeforeReservationChange = changedReservation.engine.reconcileCompressionOperations;
+  changedReservation.engine.reconcileCompressionOperations = function mutateReservationDuringReconcile(session) {
+    this.blocksFor(session).nextBlockId += 1;
+    return [];
+  };
+  let changedReservationError;
+  try {
+    await compressRange(changedReservation, changedReservationFixture, changedReservationAlias, changedReservationAlias, 'STALE-RESERVATION');
+  } catch (error) {
+    changedReservationError = error;
+  } finally {
+    changedReservation.engine.reconcileCompressionOperations = reconcileBeforeReservationChange;
+  }
+  check('reservation changes during reconciliation abort before durable planning',
+    changedReservationError?.message === 'compression state changed during whole-batch preflight; retry with the current message IDs'
+    && JSON.stringify(changedReservationFixture.session.snapshotEvents()) === changedReservationBeforeEvents
+    && changedReservation.engine._compressionJournals.has(String(changedReservationFixture.session.id)) !== true,
+  changedReservationError?.message ?? JSON.stringify(changedReservationFixture.session.snapshotEvents()));
+
+  const changedSurface = await mount();
+  const changedSurfaceFixture = fixture();
+  const changedSurfaceAlias = ref(changedSurface.engine, changedSurfaceFixture.session, changedSurfaceFixture.user);
+  const changedSurfaceBeforeEvents = JSON.stringify(changedSurfaceFixture.session.snapshotEvents());
+  const reconcileBeforeSurfaceChange = changedSurface.engine.reconcileCompressionOperations;
+  let mutatedSurfaceNodes;
+  changedSurface.engine.reconcileCompressionOperations = function mutateSurfaceDuringReconcile(session) {
+    mutatedSurfaceNodes = session.surface.nodes;
+    mutatedSurfaceNodes.push(Number(mutatedSurfaceNodes.at(-1)) + 1000);
+    return [];
+  };
+  let changedSurfaceError;
+  try {
+    await compressRange(changedSurface, changedSurfaceFixture, changedSurfaceAlias, changedSurfaceAlias, 'STALE-SURFACE');
+  } catch (error) {
+    changedSurfaceError = error;
+  } finally {
+    if (mutatedSurfaceNodes !== undefined) mutatedSurfaceNodes.pop();
+    changedSurface.engine.reconcileCompressionOperations = reconcileBeforeSurfaceChange;
+  }
+  check('surface changes during reconciliation abort before durable planning',
+    changedSurfaceError?.message === 'compression surface changed during whole-batch preflight; retry with the current message IDs'
+    && JSON.stringify(changedSurfaceFixture.session.snapshotEvents()) === changedSurfaceBeforeEvents
+    && changedSurface.engine._compressionJournals.has(String(changedSurfaceFixture.session.id)) !== true,
+  changedSurfaceError?.message ?? JSON.stringify(changedSurfaceFixture.session.snapshotEvents()));
 
   const unavailable = fixture();
   const systemRef = standard.engine.boundaryRefAtSeq(unavailable.session, Number(unavailable.system.seq));
@@ -482,6 +624,99 @@ try {
     reconcileError?.message ?? JSON.stringify({ persisted: operation?.phase, prunes: prunes.length, replacements: replacements.length }));
   }
 
+  console.log('\n--- synchronous native-compaction invalidation ---');
+  const native = await mount();
+  const nativeFixture = fixture();
+  await compressRange(native, nativeFixture, nativeFixture.user, nativeFixture.user, 'COMMITTED-BEFORE-NATIVE');
+  native.engine.setCompressionFaultInjector((phase) => {
+    if (phase === 'planned') throw new Error('leave one pending operation');
+  });
+  let pendingError;
+  try {
+    await compressRange(native, nativeFixture, nativeFixture.tail, nativeFixture.tail, 'PENDING-BEFORE-NATIVE');
+  } catch (error) {
+    pendingError = error;
+  } finally {
+    native.engine.setCompressionFaultInjector(undefined);
+  }
+  const nativeState = native.engine.blocksFor(nativeFixture.session);
+  nativeState.nudges.count = 7;
+  nativeState.nudges.lastDecision = 'stale-nudge';
+  nativeState.manualPermit = true;
+  native.engine._nudgePrompt = new Map([[String(nativeFixture.session.id), { stamp: 'stale' }]]);
+  native.engine.recordWireEstimate(nativeFixture.session, { statusFreeEstimate: 999, finalizedEstimate: 1000 });
+  const nativeJournal = native.engine.compressionJournal(nativeFixture.session);
+  const pendingBeforeNative = nativeJournal.operations().find((operation) => operation.phase === 'planned');
+  const nativeEnd = nativeFixture.session.append('compaction/end', { turn: 1, ok: true });
+  const pendingAfterNative = JSON.parse(JSON.stringify(pendingBeforeNative));
+  pendingAfterNative.operationId = `${pendingBeforeNative.operationId}-after-marker`;
+  pendingAfterNative.batchId = `${pendingBeforeNative.batchId}-after-marker`;
+  pendingAfterNative.blockId = '999';
+  pendingAfterNative.plannedAtSeq = Number(nativeEnd.seq);
+  pendingAfterNative.plan.block.blockId = '999';
+  pendingAfterNative.plan.replacementMessageId = `${pendingBeforeNative.plan.replacementMessageId}-after-marker`;
+  pendingAfterNative.plan.materialization.replacement.data.id = pendingAfterNative.plan.replacementMessageId;
+  pendingAfterNative.plan.materialization.replacement.data.source.dcpOperationId = pendingAfterNative.operationId;
+  pendingAfterNative.plan.materialization.replacement.data.source.dcpBatchId = pendingAfterNative.batchId;
+  pendingAfterNative.plan.materialization.replacement.data.source.dcpBlockId = pendingAfterNative.blockId;
+  nativeJournal.planBatch([pendingAfterNative]);
+  native.root.emit('session/event', nativeFixture.session, nativeEnd);
+  const nativePhases = nativeJournal.operations().map((operation) => operation.phase);
+  check('native compaction supersedes pending intent planned before its marker', nativePhases[1] === 'superseded', JSON.stringify(nativePhases));
+  check('native compaction preserves pending intent planned at its marker', nativePhases[2] === 'planned', JSON.stringify(nativePhases));
+  check('native compaction synchronously invalidates stale caches while retaining a visible summary', pendingError?.message === 'leave one pending operation'
+    && nativeState.size === 1 && nativeState.get('1')?.active === true && nativeState.nextBlockId === 2 && nativeState.nextRunId === 2
+    && nativeState.messageIds.nextRef === 1 && nativeState.messageIds.byRawId.size === 0 && nativeState.messageIds.byRef.size === 0
+    && nativeState.nudges.count === 0 && nativeState.manualPermit === false
+    && native.engine.wireEstimateFor(nativeFixture.session) === undefined
+    && !native.engine._nudgePrompt.has(String(nativeFixture.session.id))
+    && JSON.stringify(nativePhases) === '["committed","superseded","planned"]', JSON.stringify({ state: nativeState.toJSON(), nativePhases }));
+
+  const retainedNodeSeq = nativeState.get('1').nodeSeq;
+  nativeFixture.session.append('compaction/prune', {
+    shadowedRange: { start: retainedNodeSeq, end: retainedNodeSeq },
+    shadowedSeqs: [retainedNodeSeq],
+    shadowedTokenCount: nativeState.get('1').summaryTokens
+  });
+  nativeFixture.session.append('user/message', llm.createUserMessage({
+    content: [text('NATIVE-COMPACTION-REPLACEMENT')],
+    source: { kind: 'user' }
+  }), {
+    surfaceOp: { op: 'replace', startSeq: retainedNodeSeq, endSeq: retainedNodeSeq },
+    sourceEventSeqs: [retainedNodeSeq]
+  });
+  const secondNativeEnd = nativeFixture.session.append('compaction/end', { turn: 2, ok: true });
+  native.root.emit('session/event', nativeFixture.session, secondNativeEnd);
+  native.engine._blocksBySession.delete(String(nativeFixture.session.id));
+  native.engine._compressionJournals.delete(String(nativeFixture.session.id));
+  const restartedNativeState = native.engine.blocksFor(nativeFixture.session);
+  let nativeReconcileError;
+  try { native.engine.reconcileCompressionOperations(nativeFixture.session); } catch (error) { nativeReconcileError = error; }
+  check('restart and reconciliation cannot resurrect a pre-compaction summary that is no longer visible', nativeReconcileError === undefined
+    && restartedNativeState.size === 0 && restartedNativeState.nextBlockId === 1
+    && JSON.stringify(native.engine.compressionJournal(nativeFixture.session).operations().map((operation) => operation.phase)) === '["committed","superseded","superseded"]', nativeReconcileError?.message ?? JSON.stringify(restartedNativeState.toJSON()));
+
+  const failedPersistence = await mount();
+  const failedPersistenceFixture = fixture();
+  await compressRange(failedPersistence, failedPersistenceFixture, failedPersistenceFixture.user, failedPersistenceFixture.user, 'RESET-IN-MEMORY');
+  const failedPersistenceState = failedPersistence.engine.blocksFor(failedPersistenceFixture.session);
+  failedPersistence.engine.recordWireEstimate(failedPersistenceFixture.session, { statusFreeEstimate: 1, finalizedEstimate: 2 });
+  const saveBlocks = failedPersistence.engine.saveBlocks;
+  failedPersistence.engine.saveBlocks = () => { throw new Error('injected invalidation persistence failure'); };
+  let invalidationError;
+  try {
+    const failedEnd = failedPersistenceFixture.session.append('compaction/end', { turn: 1, ok: true });
+    failedPersistence.root.emit('session/event', failedPersistenceFixture.session, failedEnd);
+  } catch (error) {
+    invalidationError = error;
+  } finally {
+    failedPersistence.engine.saveBlocks = saveBlocks;
+  }
+  check('in-memory invalidation remains synchronous when persistence fails', invalidationError === undefined
+    && failedPersistenceState.size === 1 && failedPersistenceState.get('1')?.active === true
+    && failedPersistenceState.messageIds.nextRef === 1
+    && failedPersistence.engine.wireEstimateFor(failedPersistenceFixture.session) === undefined, invalidationError?.message ?? JSON.stringify(failedPersistenceState.toJSON()));
+
   console.log('\n--- current top-level tool-result compatibility ---');
   const currentToolResult = Object.freeze({
     id: 'tool-message-current',
@@ -556,7 +791,7 @@ try {
     && JSON.stringify(migratedAgain.absorbedBlockIds) === '[]', JSON.stringify(migratedAgain));
 } finally {
   for (const scope of scopes.reverse()) await scope.dispose();
-  rmSync(testHome, { recursive: true, force: true });
+  for (const home of temporaryHomes) rmSync(home, { recursive: true, force: true });
 }
 
 console.log(failures.length === 0 ? '\nall DCP compress tests passed' : `\n${failures.length} failure(s)`);
