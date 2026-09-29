@@ -132,6 +132,28 @@ const kb = new KnowledgeBase({ path: dbPath, producer: 'test', logger: console }
 }
 
 {
+  kb.index({ source: 'scope-a', kind: 'note', text: 'SCOPE_NEEDLE_733', session: 'session-a', createdAt: Date.now() });
+  kb.index({ source: 'scope-b', kind: 'note', text: 'SCOPE_NEEDLE_733', session: 'session-b', createdAt: Date.now() });
+  kb.index({ source: 'scope-project', kind: 'note', text: 'SCOPE_NEEDLE_733', createdAt: Date.now() });
+  const sessionHits = kb.search('SCOPE_NEEDLE_733', { scope: 'session', session: 'session-a', limit: 10 });
+  assert.deepEqual(sessionHits.map((row) => row.source), ['scope-a'], 'session scope must exclude other sessions and sessionless rows');
+  const projectHits = kb.search('SCOPE_NEEDLE_733', { scope: 'project', limit: 10 });
+  assert.equal(projectHits.length, 3);
+  console.log('kb: explicit scope strictly separates session and project rows');
+}
+
+{
+  const layerArgs = ['fts', ['needle'], null, 'project', undefined, 3, false];
+  const ftsErrorDb = { prepare: () => ({ all: () => { throw new Error('fts5: syntax error near "."'); } }) };
+  assert.deepEqual(kb._searchLayer(ftsErrorDb, ...layerArgs), []);
+  const prepareFailureDb = { prepare: () => { throw new Error('database is locked'); } };
+  assert.throws(() => kb._searchLayer(prepareFailureDb, ...layerArgs), /database is locked/);
+  const executeFailureDb = { prepare: () => ({ all: () => { throw new Error('disk I/O error'); } }) };
+  assert.throws(() => kb._searchLayer(executeFailureDb, ...layerArgs), /disk I\/O error/);
+  console.log('kb: only confirmed FTS query errors are suppressed');
+}
+
+{
   const hits = kb.search('AND OR NEAR "quoted" -dash');
   assert.ok(Array.isArray(hits), 'FTS5 operator-looking input must not throw');
   assert.equal(toMatchExpression('   '), undefined);
@@ -140,7 +162,7 @@ const kb = new KnowledgeBase({ path: dbPath, producer: 'test', logger: console }
 
 {
   const stats = kb.stats();
-  assert.equal(stats.lines, 4);
+  assert.equal(stats.lines, 7);
   assert.ok(stats.sources >= 2);
   assert.equal(kb.verify().ok, true);
   console.log(`kb: stats and integrity check ok (${stats.lines} lines, ${stats.sources} sources)`);
@@ -148,7 +170,7 @@ const kb = new KnowledgeBase({ path: dbPath, producer: 'test', logger: console }
 
 {
   const removed = kb.purge();
-  assert.equal(removed.removed, 4);
+  assert.equal(removed.removed, 7);
   assert.equal(kb.stats().lines, 0);
   console.log('kb: purge empties the index');
 }

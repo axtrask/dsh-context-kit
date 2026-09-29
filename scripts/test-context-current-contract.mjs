@@ -99,8 +99,10 @@ try {
   const sameSession = await tools.get('ctx_search').execute({ queries: ['AUTO_MEMORY_NEEDLE_918273'] }, exec(first, 'memory-same'));
   const otherRelevant = await tools.get('ctx_search').execute({ queries: ['AUTO_MEMORY_NEEDLE_918273'] }, exec(second, 'memory-other'));
   const otherTimeline = await tools.get('ctx_search').execute({ queries: ['AUTO_MEMORY_NEEDLE_918273'], sort: 'timeline' }, exec(second, 'memory-timeline'));
+  const projectTimeline = await tools.get('ctx_search').execute({ queries: ['AUTO_MEMORY_NEEDLE_918273'], sort: 'timeline', scope: 'project' }, exec(second, 'memory-project-timeline'));
   check('user events are captured without an explicit ctx_index call', sameSession.hits > 0);
-  check('relevance is session-local while timeline crosses sessions', otherRelevant.hits === 0 && otherTimeline.hits > 0, `${otherRelevant.hits}/${otherTimeline.hits}`);
+  check('search scope is session-local independently of sort', otherRelevant.hits === 0 && otherTimeline.hits === 0, `${otherRelevant.hits}/${otherTimeline.hits}`);
+  check('project scope explicitly crosses sessions', projectTimeline.hits > 0);
 
   console.log('\n--- batch scoping ---');
   await tools.get('ctx_batch_execute').execute({
