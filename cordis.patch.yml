@@ -1,6 +1,6 @@
 - insert:
     - id: context-kit-bundle-dcp
-      name: ./lib/dcp-plugin.js
+      name: dsh-context-kit/dcp-plugin
       disabled: true
       config:
         enabled: true
@@ -46,7 +46,7 @@
           protectTags: false
           protectUserMessages: false
     - id: context-kit-bundle-context-mode
-      name: ./lib/context-mode-plugin.js
+      name: dsh-context-kit/context-mode-plugin
       disabled: true
       config:
         enabled: true
@@ -69,7 +69,7 @@
         commands: true
         scratchRetentionMs: 86400000
     - id: context-kit-bundle-history-editor
-      name: ./lib/editor-plugin.js
+      name: dsh-context-kit/editor-plugin
       disabled: true
       config:
         enabled: true

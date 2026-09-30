@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-kit",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "Native DeepSeek Harness ports of DCP (dynamic context pruning) and context-mode (sandboxed tool output and a searchable knowledge base).",
