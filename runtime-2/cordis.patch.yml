@@ -1,0 +1,71 @@
+- insert:
+    - id: context-kit-bundle
+      name: ./host-entry.js
+      disabled: true
+      config:
+        dcp:
+          enabled: true
+          manualMode: false
+          automaticStrategies: true
+          pruneNotification: detailed
+          pruneNotificationType: chat
+          protectedFilePatterns: []
+          strategies:
+            deduplication:
+              enabled: true
+              protectedTools: []
+            purgeErrors:
+              enabled: true
+              turns: 4
+              protectedTools: []
+          turnProtection:
+            enabled: false
+            turns: 4
+          commands:
+            enabled: true
+          experimental:
+            allowSubAgents: false
+            customPrompts: false
+          compress:
+            mode: range
+            permission: allow
+            showCompression: false
+            summaryBuffer: true
+            maxContextLimit: 100000
+            minContextLimit: 50000
+            modelMaxLimits: {}
+            modelMinLimits: {}
+            nudgeFrequency: 5
+            iterationNudgeThreshold: 15
+            nudgeForce: soft
+            protectedTools:
+              - subagent
+              - subagent_fork
+              - skill
+              - todo_write
+              - todo_read
+            protectTags: false
+            protectUserMessages: false
+        contextMode:
+          enabled: true
+          knowledgeBasePath: ''
+          maxOutputChars: 102400
+          captureMaxBytesPerStream: 67108864
+          headChars: 6000
+          tailChars: 2000
+          timeoutMs: 120000
+          batchConcurrency: 4
+          searchLimit: 3
+          searchWindowMs: 60000
+          searchSoftCap: 3
+          searchBlockCap: 8
+          searchMaxChars: 40960
+          autoIndex: true
+          routingGuard: true
+          restrictPathsToWorkspace: false
+          guidance: true
+          commands: true
+          scratchRetentionMs: 86400000
+        historyEditor:
+          enabled: true
+          requireIdle: true

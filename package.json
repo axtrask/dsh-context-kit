@@ -38,6 +38,7 @@
     "locale/*.json",
     "locale/**/*.json",
     "runtime",
+    "runtime-2",
     "cordis.patch.yml"
   ]
 }

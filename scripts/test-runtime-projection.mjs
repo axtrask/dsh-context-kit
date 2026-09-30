@@ -32,12 +32,17 @@ try {
   assert.equal(broken.status, 1,
     'the former parent-relative entry must fail through a symlink-preserving package projection');
 
-  const runtimeProjection = join(projectedModules, 'dsh-context-kit-runtime');
-  await symlink(join(root, 'runtime'), runtimeProjection, 'junction');
-  const fixed = probe(join(runtimeProjection, 'host-entry.js'));
-  assert.equal(fixed.error, undefined, `runtime projection probe could not start: ${fixed.error?.message ?? ''}`);
-  assert.equal(fixed.status, 0,
-    'the self-contained runtime Host closure must import through a symlink-preserving package projection');
+  for (const [directory, packageName] of [
+    ['runtime', 'dsh-context-kit-runtime'],
+    ['runtime-2', 'dsh-context-kit-runtime-2'],
+  ]) {
+    const runtimeProjection = join(projectedModules, packageName);
+    await symlink(join(root, directory), runtimeProjection, 'junction');
+    const fixed = probe(join(runtimeProjection, 'host-entry.js'));
+    assert.equal(fixed.error, undefined, `${directory} projection probe could not start: ${fixed.error?.message ?? ''}`);
+    assert.equal(fixed.status, 0,
+      `${directory} self-contained Host closure must import through a symlink-preserving package projection`);
+  }
 
   const staleDirectory = join(temporary, 'stale-closure');
   const freshDirectory = join(temporary, 'fresh-closure');
