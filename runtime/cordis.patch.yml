@@ -1,6 +1,6 @@
 - insert:
     - id: context-kit-bundle
-      name: dsh-context-kit-runtime
+      name: ./index.js
       disabled: true
       config:
         dcp:

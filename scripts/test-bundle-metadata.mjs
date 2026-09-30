@@ -40,23 +40,25 @@ assert.doesNotMatch(locale.meta?.title ?? '', /^file:/i);
 const loaderNames = [...patch.matchAll(/^\s*name:\s*(\S+)\s*$/gmu)].map(match => match[1]);
 const runtimeLoaderNames = [...runtimePatch.matchAll(/^\s*name:\s*(\S+)\s*$/gmu)].map(match => match[1]);
 assert.deepEqual(loaderNames, ['dsh-context-kit'], 'the normal bundle must have one combined Loader source');
-assert.deepEqual(runtimeLoaderNames, ['dsh-context-kit-runtime'], 'the hot-migration bundle must have one fresh Loader source');
+assert.deepEqual(runtimeLoaderNames, ['./index.js'], 'the hot-migration bundle must bypass the live bare-package resolver');
 assert.equal(manifest.dsh?.client?.platform, 'web');
 assert.equal(runtimeManifest.dsh?.bundle?.patch, './cordis.patch.yml');
 assert.equal(runtimeManifest.dsh?.client?.platform, 'web');
 assert.equal(runtimeManifest.exports?.['.'], './index.js');
-assert.equal(runtimePatch.replace('name: dsh-context-kit-runtime', 'name: dsh-context-kit'), patch,
-  'normal and hot-migration bundles may differ only by package identity');
+assert.equal(runtimePatch.replace('name: ./index.js', 'name: dsh-context-kit'), patch,
+  'normal and hot-migration bundles may differ only by their Loader import address');
 const runtimePlugin = await import('../runtime/index.js');
 assert.equal(typeof runtimePlugin.apply, 'function', 'the fresh package root must be directly importable as a Host plugin');
 const parentURL = pathToFileURL(join(root, 'package.json')).href;
 const runtimeParentURL = pathToFileURL(join(root, 'runtime', 'package.json')).href;
 const meta = readPluginMeta('dsh-context-kit', parentURL);
 const runtimeMeta = readPluginMeta('dsh-context-kit-runtime', runtimeParentURL);
+const runtimeRowMeta = readPluginMeta('./index.js', runtimeParentURL);
 const title = typeof meta?.title === 'string' ? meta.title : meta?.title?.en;
 const runtimeTitle = typeof runtimeMeta?.title === 'string' ? runtimeMeta.title : runtimeMeta?.title?.en;
 assert.equal(title, 'Context Kit', 'the normal combined row must expose a readable display title');
-assert.equal(runtimeTitle, 'Context Kit', 'the hot-migration row must expose the same display title');
+assert.equal(runtimeTitle, 'Context Kit', 'the hot-migration package must expose the same display title');
+assert.equal(runtimeRowMeta, undefined, 'the relative hot-migration row must exercise the client display fallback');
 assert.equal(runtimeLocale.meta?.title, 'Context Kit');
 assert.doesNotMatch(
   patch,
@@ -64,10 +66,14 @@ assert.doesNotMatch(
   'file-relative row names bypass package display metadata',
 );
 
-function assertOneClientSource(specifiers, packageName, declaration) {
-  const sources = specifiers.filter(name => name === packageName || name.startsWith(packageName + '/'));
+function assertOneClientSource(specifiers, packageName, declaration, owns = name => name === packageName || name.startsWith(packageName + '/')) {
+  const sources = specifiers.filter(owns);
   assert.ok(declaration, 'the owning package must declare its Web client');
   assert.equal(sources.length, 1, `client package ${packageName} resolves from multiple active Loader sources: ${sources.join(', ')}`);
+}
+
+function assertHotMigrationAddress(specifiers) {
+  assert.deepEqual(specifiers, ['./index.js'], 'hot migration must use the patch-anchored relative entry');
 }
 
 const brokenTopology = [
@@ -81,9 +87,14 @@ assert.throws(
   'the former three-source topology must remain an executable failing fixture',
 );
 assert.doesNotThrow(() => assertOneClientSource(loaderNames, manifest.name, manifest.dsh?.client));
-assert.doesNotThrow(() => assertOneClientSource(runtimeLoaderNames, runtimeManifest.name, runtimeManifest.dsh?.client));
+assert.doesNotThrow(() => assertOneClientSource(runtimeLoaderNames, runtimeManifest.name, runtimeManifest.dsh?.client, name => name === './index.js'));
+assert.throws(() => assertHotMigrationAddress(['dsh-context-kit-runtime']), /patch-anchored relative entry/,
+  'the cached bare-package address must remain an executable failing fixture');
+assert.doesNotThrow(() => assertHotMigrationAddress(runtimeLoaderNames));
 assert.equal(runtimeClient.replace("id: 'dsh-context-kit-runtime'", "id: 'dsh-context-kit'"), client,
   'normal and hot-migration Web clients may differ only by package identity');
+assert.match(runtimeClient, /\['context-kit-bundle', 'runtime\/index', 'Context Kit'\]/,
+  'the hot-migration client must replace its file address with a readable title');
 const registrationId = client.match(/__ModuleLoader__\.load\(\{\s*id:\s*'([^']+)'/)?.[1];
 const runtimeRegistrationId = runtimeClient.match(/__ModuleLoader__\.load\(\{\s*id:\s*'([^']+)'/)?.[1];
 assert.equal(registrationId, manifest.name, 'the normal Web module registration id must equal its package name');
