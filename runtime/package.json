@@ -1,0 +1,28 @@
+{
+  "name": "dsh-context-kit-runtime",
+  "version": "0.1.5",
+  "private": true,
+  "type": "module",
+  "description": "Fresh runtime entry for the Context Kit host and Web plugins.",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": ["@deepseek-ai/dsh-api-session-controller", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-settings-plugins"]
+    }
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "locale/*.json",
+    "cordis.patch.yml"
+  ]
+}

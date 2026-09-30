@@ -6,9 +6,13 @@ import { readPluginMeta } from '@deepseek-ai/dsh-app-boot';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+const runtimeManifest = JSON.parse(await readFile(join(root, 'runtime', 'package.json'), 'utf8'));
 const locale = JSON.parse(await readFile(join(root, 'locale', 'en.json'), 'utf8'));
+const runtimeLocale = JSON.parse(await readFile(join(root, 'runtime', 'locale', 'en.json'), 'utf8'));
 const patch = await readFile(join(root, 'cordis.patch.yml'), 'utf8');
+const runtimePatch = await readFile(join(root, 'runtime', 'cordis.patch.yml'), 'utf8');
 const client = await readFile(join(root, 'lib', 'edit-client.js'), 'utf8');
+const runtimeClient = await readFile(join(root, 'runtime', 'client.js'), 'utf8');
 
 assert.equal(
   manifest.exports?.['./package.json'],
@@ -34,28 +38,36 @@ assert.match(locale.meta?.description ?? '', /Context Mode/i);
 assert.doesNotMatch(locale.meta?.title ?? '', /^file:/i);
 
 const loaderNames = [...patch.matchAll(/^\s*name:\s*(\S+)\s*$/gmu)].map(match => match[1]);
-assert.deepEqual(
-  loaderNames,
-  ['dsh-context-kit'],
-  'one package declaring dsh.client must have exactly one active Loader source',
-);
-assert.equal(manifest.exports?.['.'], './lib/index.js');
-const rootPlugin = await import('../lib/index.js');
-assert.equal(typeof rootPlugin.apply, 'function', 'the pre-existing package root must be directly importable as a Host plugin');
+const runtimeLoaderNames = [...runtimePatch.matchAll(/^\s*name:\s*(\S+)\s*$/gmu)].map(match => match[1]);
+assert.deepEqual(loaderNames, ['dsh-context-kit'], 'the normal bundle must have one combined Loader source');
+assert.deepEqual(runtimeLoaderNames, ['dsh-context-kit-runtime'], 'the hot-migration bundle must have one fresh Loader source');
+assert.equal(manifest.dsh?.client?.platform, 'web');
+assert.equal(runtimeManifest.dsh?.bundle?.patch, './cordis.patch.yml');
+assert.equal(runtimeManifest.dsh?.client?.platform, 'web');
+assert.equal(runtimeManifest.exports?.['.'], './index.js');
+assert.equal(runtimePatch.replace('name: dsh-context-kit-runtime', 'name: dsh-context-kit'), patch,
+  'normal and hot-migration bundles may differ only by package identity');
+const runtimePlugin = await import('../runtime/index.js');
+assert.equal(typeof runtimePlugin.apply, 'function', 'the fresh package root must be directly importable as a Host plugin');
 const parentURL = pathToFileURL(join(root, 'package.json')).href;
+const runtimeParentURL = pathToFileURL(join(root, 'runtime', 'package.json')).href;
 const meta = readPluginMeta('dsh-context-kit', parentURL);
+const runtimeMeta = readPluginMeta('dsh-context-kit-runtime', runtimeParentURL);
 const title = typeof meta?.title === 'string' ? meta.title : meta?.title?.en;
-assert.equal(title, 'Context Kit', 'the combined row must expose a readable display title');
+const runtimeTitle = typeof runtimeMeta?.title === 'string' ? runtimeMeta.title : runtimeMeta?.title?.en;
+assert.equal(title, 'Context Kit', 'the normal combined row must expose a readable display title');
+assert.equal(runtimeTitle, 'Context Kit', 'the hot-migration row must expose the same display title');
+assert.equal(runtimeLocale.meta?.title, 'Context Kit');
 assert.doesNotMatch(
   patch,
   /^\s*name:\s*\.\/lib\//mu,
   'file-relative row names bypass package display metadata',
 );
 
-function assertOneClientSource(specifiers) {
-  const sources = specifiers.filter(name => name === manifest.name || name.startsWith(manifest.name + '/'));
-  assert.ok(manifest.dsh?.client, 'the owning package must declare its Web client');
-  assert.equal(sources.length, 1, `client package ${manifest.name} resolves from multiple active Loader sources: ${sources.join(', ')}`);
+function assertOneClientSource(specifiers, packageName, declaration) {
+  const sources = specifiers.filter(name => name === packageName || name.startsWith(packageName + '/'));
+  assert.ok(declaration, 'the owning package must declare its Web client');
+  assert.equal(sources.length, 1, `client package ${packageName} resolves from multiple active Loader sources: ${sources.join(', ')}`);
 }
 
 const brokenTopology = [
@@ -64,14 +76,22 @@ const brokenTopology = [
   'dsh-context-kit/editor-plugin'
 ];
 assert.throws(
-  () => assertOneClientSource(brokenTopology),
+  () => assertOneClientSource(brokenTopology, manifest.name, manifest.dsh?.client),
   /multiple active Loader sources/,
   'the former three-source topology must remain an executable failing fixture',
 );
-assert.doesNotThrow(() => assertOneClientSource(loaderNames));
+assert.doesNotThrow(() => assertOneClientSource(loaderNames, manifest.name, manifest.dsh?.client));
+assert.doesNotThrow(() => assertOneClientSource(runtimeLoaderNames, runtimeManifest.name, runtimeManifest.dsh?.client));
+assert.equal(runtimeClient.replace("id: 'dsh-context-kit-runtime'", "id: 'dsh-context-kit'"), client,
+  'normal and hot-migration Web clients may differ only by package identity');
+const registrationId = client.match(/__ModuleLoader__\.load\(\{\s*id:\s*'([^']+)'/)?.[1];
+const runtimeRegistrationId = runtimeClient.match(/__ModuleLoader__\.load\(\{\s*id:\s*'([^']+)'/)?.[1];
+assert.equal(registrationId, manifest.name, 'the normal Web module registration id must equal its package name');
+assert.equal(runtimeRegistrationId, runtimeManifest.name, 'the hot-migration Web module registration id must equal its package name');
 assert.match(client, /const namespace = 'context-kit-bundle';/);
 assert.equal((client.match(/configForms\.get\(/g) ?? []).length, 1, 'the client must bind one writable Config namespace');
 assert.match(client, /path: \[spec\.section, key\]/, 'every card must write beneath its nested Host section');
-assert.match(client, /current\.value\?\.\[spec\.section\]\?\.\[op\.path\[1\]\]/, 'save verification must read the same nested path');
+assert.match(client, /const accepted = await scope\.mutate\(ops, draft\.revision\);/);
+assert.match(client, /if \(!accepted\) throw new Error/);
 
 console.log('bundle metadata and single-client-source checks passed');

@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-kit",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "description": "Native DeepSeek Harness integrations for DCP, Context Mode, and History Editor.",
@@ -37,6 +37,7 @@
     "lib",
     "locale/*.json",
     "locale/**/*.json",
+    "runtime",
     "cordis.patch.yml"
   ]
 }
