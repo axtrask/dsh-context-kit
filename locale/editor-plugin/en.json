@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "History Editor",
+    "description": "Provides controlled conversation-history editing while a session is idle."
+  }
+}

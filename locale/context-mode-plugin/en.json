@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Context Mode",
+    "description": "Captures large tool output safely and keeps it searchable outside the conversation."
+  }
+}

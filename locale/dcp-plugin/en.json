@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DCP",
+    "description": "Safely compresses conversation history while preserving message lineage."
+  }
+}
