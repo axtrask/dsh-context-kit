@@ -64,13 +64,31 @@ await mount(contextKit, {
 assert.equal(settingsConfigureCalls - configureCallsBeforeCombined, 1, 'the combined fiber must register one settings presentation');
 
 let client;
+const hookStates = [];
+let hookIndex = 0;
 const React = {
   createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
   useEffect() {},
   useRef: initial => ({ current: initial }),
-  useState: initial => [initial, () => {}],
+  useState(initial) {
+    const index = hookIndex++;
+    if (!(index in hookStates)) hookStates[index] = typeof initial === 'function' ? initial() : initial;
+    return [hookStates[index], value => { hookStates[index] = typeof value === 'function' ? value(hookStates[index]) : value; }];
+  },
   useSyncExternalStore: (_subscribe, snapshot) => snapshot()
 };
+const render = (Component, props = {}) => { hookIndex = 0; return Component(props); };
+const findNode = (node, predicate) => {
+  if (Array.isArray(node)) {
+    for (const child of node) { const found = findNode(child, predicate); if (found) return found; }
+    return undefined;
+  }
+  if (!node || typeof node !== 'object') return undefined;
+  if (predicate(node)) return node;
+  return findNode(node.children, predicate);
+};
+const nodeText = node => Array.isArray(node) ? node.map(nodeText).join('')
+  : node && typeof node === 'object' ? nodeText(node.children) : typeof node === 'string' ? node : '';
 const window = new EventTarget();
 window.__ModuleLoader__ = { load: definition => { client = definition.factory(() => React); } };
 runInNewContext(readFileSync(new URL('../lib/edit-client.js', import.meta.url), 'utf8'), { window, Event });
@@ -82,14 +100,17 @@ const slots = {
     return () => {};
   }
 };
+const baseValue = {
+  dcp: { enabled: true, prompts: {} },
+  contextMode: { enabled: true },
+  historyEditor: { enabled: true, requireIdle: true }
+};
+let formSnapshot = { status: 'ready', value: structuredClone(baseValue), base: structuredClone(baseValue), user: {}, revision: 0, writable: true };
+let mutate = async () => true;
 const form = {
-  getSnapshot: () => ({ status: 'ready', value: {
-    dcp: { enabled: true, prompts: {} },
-    contextMode: { enabled: true },
-    historyEditor: { enabled: true }
-  }, revision: 0, writable: true }),
+  getSnapshot: () => formSnapshot,
   subscribe: () => () => {},
-  mutate: async () => true
+  mutate: (...args) => mutate(...args)
 };
 const requestedNamespaces = [];
 client.apply({
@@ -101,6 +122,42 @@ client.apply({
 });
 assert.deepEqual(requestedNamespaces, ['context-kit-bundle']);
 assert.equal(settingsTab?.spec.id, 'context-kit');
-assert.equal(settingsTab.component().children[2].children.length, 3);
+const settingsView = settingsTab.component();
+assert.equal(settingsView.children[2].children.length, 3);
+const historyCard = settingsView.children[2].children[2];
+
+let card = render(historyCard.type, historyCard.props);
+let advanced = findNode(card, node => node.props?.['aria-label'] === 'History Editor configuration JSON');
+advanced.props.onChange({ target: { value: JSON.stringify({ requireIdle: true }, null, 2) } });
+card = render(historyCard.type, historyCard.props);
+let save = findNode(card, node => node.type === 'button' && node.props?.className === 'primary');
+let writtenOps;
+mutate = async ops => {
+  writtenOps = structuredClone(ops);
+  formSnapshot = { ...formSnapshot, user: { historyEditor: { enabled: true } }, revision: 1 };
+  return true;
+};
+await save.props.onClick();
+assert.deepEqual(writtenOps, [{ op: 'unset', path: ['historyEditor', 'enabled'] }]);
+card = render(historyCard.type, historyCard.props);
+save = findNode(card, node => node.type === 'button' && node.props?.className === 'primary');
+assert.equal(save.props.disabled, true, 'an accepted unset materialized from the base layer must clear the draft');
+
+hookStates.length = 0;
+formSnapshot = { status: 'ready', value: structuredClone(baseValue), base: structuredClone(baseValue), user: {}, revision: 2, writable: true };
+card = render(historyCard.type, historyCard.props);
+advanced = findNode(card, node => node.props?.['aria-label'] === 'History Editor configuration JSON');
+advanced.props.onChange({ target: { value: JSON.stringify({ enabled: false, requireIdle: true }, null, 2) } });
+card = render(historyCard.type, historyCard.props);
+save = findNode(card, node => node.type === 'button' && node.props?.className === 'primary');
+mutate = async () => {
+  formSnapshot = { ...formSnapshot, value: { ...formSnapshot.value, historyEditor: { enabled: false, requireIdle: true } } };
+  return false;
+};
+await save.props.onClick();
+card = render(historyCard.type, historyCard.props);
+save = findNode(card, node => node.type === 'button' && node.props?.className === 'primary');
+assert.equal(save.props.disabled, false, 'a refused mutation must keep the draft even when the published value happens to match');
+assert.match(nodeText(findNode(card, node => node.props?.role === 'status')), /refused/i);
 
 console.log('[ok] current DSH settings API activates the combined host plugin and its three settings cards');
