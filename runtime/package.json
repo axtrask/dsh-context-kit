@@ -21,6 +21,7 @@
   },
   "files": [
     "index.js",
+    "entry.js",
     "client.js",
     "locale/*.json",
     "cordis.patch.yml"

@@ -1,6 +1,6 @@
 - insert:
     - id: context-kit-bundle
-      name: ./index.js
+      name: ./entry.js
       disabled: true
       config:
         dcp:
