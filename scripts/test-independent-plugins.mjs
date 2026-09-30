@@ -25,46 +25,56 @@ const check = async (name, fn) => {
   catch (error) { failed++; console.error('[FAIL] ' + name + ': ' + error.stack); }
 };
 
-await check('three separately importable host plugins own three settings sections', async () => {
+await check('one combined host plugin retains the three importable feature entrypoints', async () => {
   for (const [file, namespace] of [['dcp-plugin', 'dcp'], ['context-mode-plugin', 'context-mode'], ['editor-plugin', 'history-editor']]) {
     const plugin = await import('../lib/' + file + '.js');
     assert.equal(plugin.name, namespace);
     assert.equal(typeof plugin.apply, 'function');
     assert.ok(plugin.inject.includes('settings'));
   }
+  const combined = await import('../lib/plugin.js');
+  assert.equal(combined.name, 'context-kit');
+  assert.equal(typeof combined.apply, 'function');
+  assert.ok(combined.inject.includes('settings'));
 });
 
-await check('the client registers three native keyed settings cards', async () => {
-  let plugin;
+await check('the client registers three cards backed by one writable settings namespace', async () => {
+  let plugin, settingsTab;
   const window = new EventTarget();
   const React = {
-    createElement: (type, props, ...children) => ({ type, props, children }),
+    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     useState: initial => [initial, () => {}],
     useEffect() {},
     useSyncExternalStore: (_subscribe, snapshot) => snapshot()
   };
   window.__ModuleLoader__ = { load: definition => { plugin = definition.factory(() => React); } };
   runInNewContext(readFileSync(new URL('../lib/edit-client.js', import.meta.url), 'utf8'), { window, Event });
-  const cards = new Map(), scopes = [];
+  const namespaces = [];
   const slots = {
-    register(spec, component) { if (spec.name === 'settings.plugin.item') cards.set(spec.key, component); return () => {}; },
-    inject(name, body) { const result = body(); if (result?.next) for (const value of result) void value; }
+    register(spec, component) { if (spec.name === 'settings.plugins.tab') settingsTab = component; return () => {}; },
+    inject(_name, body) { const result = body(); if (result?.next) for (const value of result) void value; }
   };
   plugin.apply({
     sessions: { list: { getSnapshot: () => ({}), subscribe: () => () => {} } },
     effect: fn => fn(),
     inject(names, body) {
       assert.ok(names.includes('slots'));
-      body({ slots, settingsScope: { bind({ namespace }) {
-        scopes.push(namespace);
-        return { getSnapshot: () => ({ status: 'ready', writable: true, value: {} }) };
+      body({ slots, configForms: { get(namespace) {
+        namespaces.push(namespace);
+        return {
+          getSnapshot: () => ({ status: 'ready', revision: 0, writable: true, value: {
+            dcp: { enabled: true, prompts: {} }, contextMode: { enabled: true }, historyEditor: { enabled: true }
+          } }),
+          subscribe: () => () => {}, mutate: async () => {}
+        };
       } } });
     }
   });
-  assert.deepEqual([...cards.keys()].sort(), ['context-mode', 'dcp', 'history-editor']);
-  assert.deepEqual(scopes.sort(), [...cards.keys()].sort());
-  for (const component of cards.values()) {
-    const tree = component();
+  assert.deepEqual(namespaces, ['context-kit-bundle']);
+  const cards = settingsTab().children[2].children;
+  assert.equal(cards.length, 3);
+  for (const card of cards) {
+    const tree = card.type(card.props);
     const header = tree.children.find(child => child?.props?.className === 'ctxkit-settings-header');
     const title = header.children[0].children[0];
     assert.equal(title.type, 'span', 'card titles must not pick up the palette markdown strong color');
@@ -145,7 +155,7 @@ await check('Context Mode isolates project indexes and session counters on one h
   } finally { await scope.dispose(); }
 });
 
-await check('native settings mount all plugins without a preset; editor survives DCP off', async () => {
+await check('one combined settings entry mounts every feature; editor survives DCP off', async () => {
   resetBridgeForTest();
   const root = new Context(), tools = new Map(), commands = new Map(), routes = [];
   root.provide('tools', { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name); } });
@@ -157,24 +167,23 @@ await check('native settings mount all plugins without a preset; editor survives
   root.provide('webServer', { register(route) { routes.push(route); return () => {}; }, tapIndex: () => () => {} });
   const provider = root.plugin(FileSettingsProvider, { path: join(home, 'settings.yaml'), watch: false });
   await provider.await();
-  const mounts = [];
+  const mount = root.plugin(await import('../lib/plugin.js'), {
+    dcp: { enabled: false }, contextMode: { enabled: false }, historyEditor: { enabled: true }
+  });
   try {
-    for (const [file, config] of [['dcp-plugin', { enabled: false }], ['context-mode-plugin', { enabled: false }], ['editor-plugin', { enabled: true }]]) {
-      const mount = root.plugin(await import('../lib/' + file + '.js'), config);
-      mounts.push(mount); await mount.await();
-    }
+    await mount.await();
     assert.ok(commands.has('edit'));
     assert.ok(!commands.has('dcp'));
     assert.ok(!tools.has('ctx_execute'));
     assert.equal(routes.filter(route => route.path === '/ctxkit.edit').length, 1);
     assert.equal(engineFromBridge().editorConfig.enabled, true);
     assert.ok(editStoreFor('an-independent-session'));
-    await root.settings.update('history-editor', { enabled: false });
-    assert.equal(engineFromBridge().editorConfig.enabled, false, 'editor settings are live');
-    await root.settings.update('history-editor', { enabled: true });
+    await root.settings.update('context-kit', { historyEditor: { enabled: false } });
+    assert.equal(engineFromBridge().editorConfig.enabled, false, 'nested editor settings are live');
+    await root.settings.update('context-kit', { historyEditor: { enabled: true } });
     assert.equal(engineFromBridge().editorConfig.enabled, true);
   } finally {
-    for (const mount of mounts.reverse()) await mount.dispose();
+    await mount.dispose();
     await provider.dispose(); resetBridgeForTest();
   }
 });

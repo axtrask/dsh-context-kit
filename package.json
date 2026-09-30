@@ -1,9 +1,9 @@
 {
   "name": "dsh-context-kit",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "type": "module",
-  "description": "Native DeepSeek Harness ports of DCP (dynamic context pruning) and context-mode (sandboxed tool output and a searchable knowledge base).",
+  "description": "Native DeepSeek Harness integrations for DCP, Context Mode, and History Editor.",
   "exports": {
     ".": "./lib/index.js",
     "./dcp": "./lib/dcp.js",
@@ -17,6 +17,9 @@
     "./editor-plugin": "./lib/editor-plugin.js",
     "./editor-plugin/package.json": "./package.json",
     "./editor-plugin/locale/*.json": "./locale/editor-plugin/*.json",
+    "./plugin": "./lib/plugin.js",
+    "./plugin/package.json": "./package.json",
+    "./plugin/locale/*.json": "./locale/plugin/*.json",
     "./client": "./lib/edit-client.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
