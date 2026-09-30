@@ -1,6 +1,6 @@
 - insert:
     - id: context-kit-bundle
-      name: dsh-context-kit/plugin
+      name: dsh-context-kit
       disabled: true
       config:
         dcp:

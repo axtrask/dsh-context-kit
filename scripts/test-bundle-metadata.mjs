@@ -36,12 +36,14 @@ assert.doesNotMatch(locale.meta?.title ?? '', /^file:/i);
 const loaderNames = [...patch.matchAll(/^\s*name:\s*(\S+)\s*$/gmu)].map(match => match[1]);
 assert.deepEqual(
   loaderNames,
-  ['dsh-context-kit/plugin'],
+  ['dsh-context-kit'],
   'one package declaring dsh.client must have exactly one active Loader source',
 );
-assert.equal(manifest.exports?.['./plugin'], './lib/plugin.js');
+assert.equal(manifest.exports?.['.'], './lib/index.js');
+const rootPlugin = await import('../lib/index.js');
+assert.equal(typeof rootPlugin.apply, 'function', 'the pre-existing package root must be directly importable as a Host plugin');
 const parentURL = pathToFileURL(join(root, 'package.json')).href;
-const meta = readPluginMeta('dsh-context-kit/plugin', parentURL);
+const meta = readPluginMeta('dsh-context-kit', parentURL);
 const title = typeof meta?.title === 'string' ? meta.title : meta?.title?.en;
 assert.equal(title, 'Context Kit', 'the combined row must expose a readable display title');
 assert.doesNotMatch(
