@@ -696,6 +696,21 @@ try {
     && restartedNativeState.size === 0 && restartedNativeState.nextBlockId === 1
     && JSON.stringify(native.engine.compressionJournal(nativeFixture.session).operations().map((operation) => operation.phase)) === '["committed","superseded","superseded"]', nativeReconcileError?.message ?? JSON.stringify(restartedNativeState.toJSON()));
 
+  const postNativeUser = appendUser(nativeFixture.session, 'AFTER-NATIVE-COMPACTION');
+  let postNativeResult;
+  let postNativeError;
+  try {
+    postNativeResult = await compressRange(native, nativeFixture, postNativeUser, postNativeUser, 'POST-NATIVE-COMPRESSION');
+  } catch (error) {
+    postNativeError = error;
+  }
+  const postNativeOperations = native.engine.compressionJournal(nativeFixture.session).operations();
+  const postNativeOperationIds = postNativeOperations.map((operation) => operation.operationId);
+  check('compression after native compaction resets the display block id but never reuses a durable run id', postNativeError === undefined
+    && postNativeResult?.compressed === true && postNativeResult.blocks?.[0]?.blockId === '1'
+    && postNativeOperationIds.length === new Set(postNativeOperationIds).size
+    && postNativeOperationIds.at(-1)?.includes(':run-3:blocks-1-1:block-1'), postNativeError?.message ?? JSON.stringify({ postNativeResult, postNativeOperationIds }));
+
   const failedPersistence = await mount();
   const failedPersistenceFixture = fixture();
   await compressRange(failedPersistence, failedPersistenceFixture, failedPersistenceFixture.user, failedPersistenceFixture.user, 'RESET-IN-MEMORY');
