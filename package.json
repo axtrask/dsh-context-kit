@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-kit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Native DeepSeek Harness ports of DCP (dynamic context pruning) and context-mode (sandboxed tool output and a searchable knowledge base).",
@@ -11,7 +11,9 @@
     "./dcp-plugin": "./lib/dcp-plugin.js",
     "./context-mode-plugin": "./lib/context-mode-plugin.js",
     "./editor-plugin": "./lib/editor-plugin.js",
-    "./client": "./lib/edit-client.js"
+    "./client": "./lib/edit-client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "dsh": {
     "bundle": {
@@ -24,6 +26,7 @@
   },
   "files": [
     "lib",
+    "locale/*.json",
     "cordis.patch.yml"
   ]
 }
