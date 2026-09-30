@@ -687,14 +687,27 @@ try {
   });
   const secondNativeEnd = nativeFixture.session.append('compaction/end', { turn: 2, ok: true });
   native.root.emit('session/event', nativeFixture.session, secondNativeEnd);
+  const failedAfterNative = JSON.parse(JSON.stringify(pendingAfterNative));
+  failedAfterNative.operationId = `dcp:${nativeFixture.session.id}:run-3:blocks-1000-1000:block-1000`;
+  failedAfterNative.batchId = `${pendingAfterNative.batchId}-failed`;
+  failedAfterNative.blockId = '1000';
+  failedAfterNative.plannedAtSeq = Number(secondNativeEnd.seq);
+  failedAfterNative.plan.reservation.nextBlockId = 1001;
+  failedAfterNative.plan.reservation.nextRunId = 4;
+  failedAfterNative.plan.block.blockId = '1000';
+  failedAfterNative.plan.replacementMessageId = `${pendingAfterNative.plan.replacementMessageId}-failed`;
+  failedAfterNative.plan.materialization.replacement.data.id = failedAfterNative.plan.replacementMessageId;
+  failedAfterNative.plan.materialization.replacement.data.source.dcpOperationId = failedAfterNative.operationId;
+  failedAfterNative.plan.materialization.replacement.data.source.dcpBatchId = failedAfterNative.batchId;
+  failedAfterNative.plan.materialization.replacement.data.source.dcpBlockId = failedAfterNative.blockId;
+  nativeJournal.planBatch([failedAfterNative]);
+  nativeJournal.transition(failedAfterNative.operationId, 'failed', { failure: 'intentional terminal fixture' });
   native.engine._blocksBySession.delete(String(nativeFixture.session.id));
   native.engine._compressionJournals.delete(String(nativeFixture.session.id));
   const restartedNativeState = native.engine.blocksFor(nativeFixture.session);
-  let nativeReconcileError;
-  try { native.engine.reconcileCompressionOperations(nativeFixture.session); } catch (error) { nativeReconcileError = error; }
-  check('restart and reconciliation cannot resurrect a pre-compaction summary that is no longer visible', nativeReconcileError === undefined
-    && restartedNativeState.size === 0 && restartedNativeState.nextBlockId === 1
-    && JSON.stringify(native.engine.compressionJournal(nativeFixture.session).operations().map((operation) => operation.phase)) === '["committed","superseded","superseded"]', nativeReconcileError?.message ?? JSON.stringify(restartedNativeState.toJSON()));
+  check('restart cannot resurrect a pre-compaction summary that is no longer visible',
+    restartedNativeState.size === 0 && restartedNativeState.nextBlockId === 1 && restartedNativeState.nextRunId === 1,
+    JSON.stringify(restartedNativeState.toJSON()));
 
   const postNativeUser = appendUser(nativeFixture.session, 'AFTER-NATIVE-COMPACTION');
   let postNativeResult;
@@ -706,10 +719,15 @@ try {
   }
   const postNativeOperations = native.engine.compressionJournal(nativeFixture.session).operations();
   const postNativeOperationIds = postNativeOperations.map((operation) => operation.operationId);
-  check('compression after native compaction resets the display block id but never reuses a durable run id', postNativeError === undefined
+  check('first compression after restart self-heals from every terminal journal reservation', postNativeError === undefined
+    && JSON.stringify(postNativeOperations.slice(0, 4).map((operation) => operation.phase)) === '["committed","superseded","superseded","failed"]'
     && postNativeResult?.compressed === true && postNativeResult.blocks?.[0]?.blockId === '1'
     && postNativeOperationIds.length === new Set(postNativeOperationIds).size
-    && postNativeOperationIds.at(-1)?.includes(':run-3:blocks-1-1:block-1'), postNativeError?.message ?? JSON.stringify({ postNativeResult, postNativeOperationIds }));
+    && postNativeOperationIds.at(-1)?.includes(':run-4:blocks-1-1:block-1'), postNativeError?.message ?? JSON.stringify({
+      blockId: postNativeResult?.blocks?.[0]?.blockId,
+      operationIds: postNativeOperationIds,
+      phases: postNativeOperations.map((operation) => operation.phase)
+    }));
 
   const failedPersistence = await mount();
   const failedPersistenceFixture = fixture();
