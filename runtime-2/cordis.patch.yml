@@ -24,7 +24,7 @@
           commands:
             enabled: true
           experimental:
-            allowSubAgents: false
+            allowSubAgents: true
             customPrompts: false
           compress:
             mode: range

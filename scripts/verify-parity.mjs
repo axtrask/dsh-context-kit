@@ -76,7 +76,7 @@ if (failures.length > 0) {
 check('dcp exports an engine class', typeof dcp.DcpCompactionEngine === 'function');
 check('context-mode exports apply()', typeof contextMode.apply === 'function');
 
-console.log('\n--- configuration surface (upstream defaults) ---');
+console.log('\n--- configuration surface (upstream defaults plus local policy) ---');
 const dcpConfig = dcp.Config({});
 const EXPECTED = [
   ['compress.mode', 'range'],
@@ -90,7 +90,8 @@ const EXPECTED = [
   ['compress.nudgeForce', 'soft'],
   ['pruneNotification', 'detailed'],
   ['pruneNotificationType', 'chat'],
-  ['experimental.allowSubAgents', false],
+  // Intentional product divergence: Context Kit gives each isolated subagent DCP by default.
+  ['experimental.allowSubAgents', true],
   ['experimental.customPrompts', false]
 ];
 for (const [path, expected] of EXPECTED) {

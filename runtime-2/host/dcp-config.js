@@ -102,7 +102,9 @@ const editor = z.object({
   requireIdle: z.boolean().default(true)
 });
 const experimental = z.object({
-  allowSubAgents: z.boolean().default(false),
+  // Context Kit intentionally enables DCP inside each isolated subagent by default.
+  // Upstream defaults this to false; an explicit false remains a supported opt-out.
+  allowSubAgents: z.boolean().default(true),
   customPrompts: z.boolean().default(false)
 });
 

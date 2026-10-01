@@ -131,9 +131,11 @@ helper; production uses the materialization and shared-wire paths above.
   tagged as completed output. Their diagnostic bytes survive the provider transform unchanged.
 - Nested block ownership is explicit: restoring a parent reactivates uncovered child summaries,
   while recompressing the parent deactivates those children under the parent again.
-- The active profile registers `compress` globally. On `agent/created`, the plugin uses the
-  shipped scoped tool seam `agent.ctx.tools.restrict({deny:['compress']})` for subagents before
-  first prompt assembly. No generated npm-cache artifact or DSH core source is modified.
+- The active profile registers `compress` globally. Context Kit enables it for each isolated
+  subagent by default; a subagent can compress only its own context. With an explicit
+  `experimental.allowSubAgents: false`, the plugin uses the shipped scoped tool seam
+  `agent.ctx.tools.restrict({deny:['compress']})` before first prompt assembly. No generated
+  npm-cache artifact or DSH core source is modified.
 
 ## 4. Review-closure behavior
 

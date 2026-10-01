@@ -330,12 +330,12 @@ console.log('\n--- subagent sessions ---');
 {
   const { engine } = engineFor({}, 10);
   check('a top-level session is allowed', engine.allowsSession({ header: { delegationDepth: 0 } }) === true);
-  check('a delegated session is refused by default', engine.allowsSession({ header: { delegationDepth: 1 } }) === false);
+  check('a delegated session is allowed by default', engine.allowsSession({ header: { delegationDepth: 1 } }) === true);
   check('a session with no depth recorded is allowed', engine.allowsSession({ header: {} }) === true);
-  const { engine: permissive } = engineFor({ experimental: { allowSubAgents: true } }, 10);
-  check('allowSubAgents lifts the refusal', permissive.allowsSession({ header: { delegationDepth: 2 } }) === true);
-  const landed = engine.pruneSession({ header: { delegationDepth: 1 }, seq: 0, eventAt: () => undefined, surface: { nodes: [] } }, undefined);
-  check('a delegated session lands no replacements', Array.isArray(landed) && landed.length === 0, JSON.stringify(landed));
+  const { engine: restrictive } = engineFor({ experimental: { allowSubAgents: false } }, 10);
+  check('allowSubAgents=false restores the refusal', restrictive.allowsSession({ header: { delegationDepth: 2 } }) === false);
+  const landed = restrictive.pruneSession({ header: { delegationDepth: 1 }, seq: 0, eventAt: () => undefined, surface: { nodes: [] } }, undefined);
+  check('an explicitly disabled delegated session lands no replacements', Array.isArray(landed) && landed.length === 0, JSON.stringify(landed));
 }
 
 console.log('\n--- custom prompt overrides ---');

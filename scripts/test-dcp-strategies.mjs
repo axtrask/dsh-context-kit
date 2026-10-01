@@ -966,7 +966,7 @@ function oneTurnWithSteps(steps, { caller = 'bash', outcome = 'ok' } = {}) {
 /* -------------------------------------------------------------- subagent ban */
 
 {
-  const { engine } = await mountEngine({});
+  const { engine } = await mountEngine({ experimental: { allowSubAgents: false } });
   const session = fakeSession(duplicatePair('bash', { command: 'ls' }, 'out'));
   session.header = { origin: 'subagent', delegationDepth: 1 };
   const added = engine.pruneSession(session);

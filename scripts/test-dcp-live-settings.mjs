@@ -144,7 +144,7 @@ await check('the DCP card exposes thresholds, six prompts and explained settings
   const rendered = JSON.stringify(card());
   for (const label of ['Reminder threshold', 'Context-limit threshold', 'Critical reminder every', 'Long-run reminder after',
     'System guidance', 'Context reminder', 'Long-run reminder', 'Context-limit reminder', 'Compress ranges', 'Compress messages',
-    'Deduplicate tool results', 'Protect user messages', 'Advanced configuration']) assert.ok(rendered.includes(label), 'missing control: ' + label);
+    'Deduplicate tool results', 'Protect user messages', 'Allow DCP in subagents', 'Advanced configuration']) assert.ok(rendered.includes(label), 'missing control: ' + label);
   assert.match(rendered, /next.*step/i);
 });
 console.log(`${passed} passed, ${failed} failed`);

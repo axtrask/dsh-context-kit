@@ -250,34 +250,39 @@ try {
     assert.ok(user);
   });
 
-  await check('default subagent catalog hides compress with the real scoped ToolRuntime', async () => {
-    const root = new Context();
-    await root.plugin(SystemPrompt, {});
-    await root.plugin(ToolRuntime, {});
-    root.provide('llm', llm);
-    root.provide('tokenMeter', { estimateMessage: () => 1, measure: () => ({ totalTokens: 0, nodes: [] }) });
-    new SessionStore(root);
-    const plugin = root.plugin(dcp, { experimental: { allowSubAgents: false }, strategies: strategiesOff });
-    scopes.push(plugin);
-    await new Promise((resolve) => setTimeout(resolve, 150));
+  await check('subagent catalog exposes compress by default and an explicit opt-out hides it', async () => {
+    for (const { label, config, childHasCompress } of [
+      { label: 'default', config: {}, childHasCompress: true },
+      { label: 'restricted', config: { experimental: { allowSubAgents: false } }, childHasCompress: false }
+    ]) {
+      const root = new Context();
+      await root.plugin(SystemPrompt, {});
+      await root.plugin(ToolRuntime, {});
+      root.provide('llm', llm);
+      root.provide('tokenMeter', { estimateMessage: () => 1, measure: () => ({ totalTokens: 0, nodes: [] }) });
+      new SessionStore(root);
+      const plugin = root.plugin(dcp, { ...config, strategies: strategiesOff });
+      scopes.push(plugin);
+      await new Promise((resolve) => setTimeout(resolve, 150));
 
-    const makeAgent = async (id, header) => {
-      const agent = { id: SessionId(id) };
-      let scope;
-      const holder = root.plugin(Object.assign((inner) => { scope = createScope(inner, agent); }, { inject: ['tools', 'systemPrompt'] }));
-      scopes.push(holder);
-      await holder;
-      agent.ctx = scope.ctx;
-      agent.scope = scope;
-      agent.session = { id: agent.id, header, seq: 0, eventAt: () => undefined, snapshotEvents: () => [], surface: { nodes: [] } };
-      root.emit('agent/created', { agent });
-      return agent;
-    };
-    const main = await makeAgent(`catalog-main-${Date.now()}`, { delegationDepth: 0 });
-    const child = await makeAgent(`catalog-child-${Date.now()}`, { origin: 'subagent', delegationDepth: 1 });
-    assert.ok(root.tools.schemas(main).some((tool) => tool.name === 'compress'));
-    assert.ok(!root.tools.schemas(child).some((tool) => tool.name === 'compress'));
-    assert.ok(root.tools.schemas().some((tool) => tool.name === 'compress'));
+      const makeAgent = async (id, header) => {
+        const agent = { id: SessionId(id) };
+        let scope;
+        const holder = root.plugin(Object.assign((inner) => { scope = createScope(inner, agent); }, { inject: ['tools', 'systemPrompt'] }));
+        scopes.push(holder);
+        await holder;
+        agent.ctx = scope.ctx;
+        agent.scope = scope;
+        agent.session = { id: agent.id, header, seq: 0, eventAt: () => undefined, snapshotEvents: () => [], surface: { nodes: [] } };
+        root.emit('agent/created', { agent });
+        return agent;
+      };
+      const main = await makeAgent(`catalog-${label}-main-${Date.now()}`, { delegationDepth: 0 });
+      const child = await makeAgent(`catalog-${label}-child-${Date.now()}`, { origin: 'subagent', delegationDepth: 1 });
+      assert.ok(root.tools.schemas(main).some((tool) => tool.name === 'compress'));
+      assert.equal(root.tools.schemas(child).some((tool) => tool.name === 'compress'), childHasCompress);
+      assert.ok(root.tools.schemas().some((tool) => tool.name === 'compress'));
+    }
   });
 
   await check('native and restart-detected compaction reset and persist aliases even with no blocks', async () => {
