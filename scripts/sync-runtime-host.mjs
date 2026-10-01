@@ -9,6 +9,7 @@ const targets = [
   { label: 'runtime/host', directory: join(root, 'runtime', 'host') },
   { label: 'runtime-2/host', directory: join(root, 'runtime-2', 'host') },
   { label: 'runtime-3/host', directory: join(root, 'runtime-3', 'host') },
+  { label: 'runtime-4/host', directory: join(root, 'runtime-4', 'host') },
 ];
 const excluded = new Set(['edit-client.js', 'index.js']);
 const checkOnly = process.argv.includes('--check');

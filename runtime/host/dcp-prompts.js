@@ -1,14 +1,12 @@
 /**
  * The prompt texts DCP puts in front of the model.
  *
- * These are copied VERBATIM from upstream
- * (`Opencode-DCP/opencode-dynamic-context-pruning`, `lib/prompts/*`). The port
- * originally invented its own four-line policy and a three-paragraph tool
- * description, which meant the same model in the same conversation was told
- * something different here than in OpenCode: no `COMPRESS WHEN` / `DO NOT
- * COMPRESS IF` criteria, no requirement that a summary be exhaustive, no
- * instruction to preserve user intent by quoting it. Tool behaviour cannot be
- * "1:1" while the instructions that drive it are not.
+ * These use upstream's prompts
+ * (`Opencode-DCP/opencode-dynamic-context-pruning`, `lib/prompts/*`) as their
+ * baseline. The range tool deliberately adds local guidance for purpose,
+ * narrative preservation, useful failed attempts, and temporal anchoring; the
+ * remaining prompt surface stays aligned with upstream and the port's block
+ * placeholder contract.
  *
  * Model-facing vocabulary is upstream's unchanged: stable `mNNNN` aliases,
  * compressed `bN` references, and string boundaries in the compress schema.
@@ -100,16 +98,23 @@ Do not include their content in compress tool summaries — the environment reta
 }
 
 /** `lib/prompts/compress-range.ts` — range-mode tool description. */
-export const COMPRESS_RANGE = `Collapse a range in the conversation into a detailed summary.
+export const COMPRESS_RANGE = `Collapse a range in the conversation into a detailed summary. This reduces context usage while preserving the technical record, user intent, and narrative needed to understand what happened and continue the work correctly.
 
 THE SUMMARY
 Your summary must be EXHAUSTIVE. Capture file paths, function signatures, decisions made, constraints discovered, key findings... EVERYTHING that maintains context integrity. This is not a brief note - it is an authoritative record so faithful that the original conversation adds no value.
 
 USER INTENT FIDELITY
 When the compressed range includes user messages, preserve the user's intent with extra care. Do not change scope, constraints, priorities, acceptance criteria, or requested outcomes.
-Directly quote user messages when they are short enough to include safely. Direct quotes are preferred when they best preserve exact meaning.
+You may preserve user messages verbatim, in full or as direct quotations, when this helps maintain a clear narrative, preserves exact intent, or makes later decisions understandable. User wording is part of the conversation record and should not be removed merely for brevity.
 
-Yet be LEAN. Strip away the noise: failed attempts that led nowhere, verbose tool outputs, back-and-forth exploration. What remains should be pure signal - golden nuggets of detail that preserve full understanding with zero ambiguity.
+Yet be LEAN. Strip away only noise: verbose tool outputs, repetitive back-and-forth exploration, and details that teach nothing. Preserve failed attempts when they provide reusable information: what was tried, why it failed or was rejected, and what should be done instead. What remains should be pure signal - golden nuggets of detail that preserve full understanding with zero ambiguity.
+
+TEMPORAL ANCHORING
+The summary replaces the selected range at that range's original position in the conversation; it is not appended to the current end. Write it as a historical record whose statements remain correct at that chronological position.
+
+Do not use unqualified conversation-relative language such as "current task", "current work", "now", "next step", "latest state", or "still pending". If end-of-range state is essential, anchor it explicitly with wording such as "At the end of this range, ..." or "The next step planned at that point was ...". Later conversation may supersede that state.
+
+Do not describe events or state from after the selected range. If the selected work is resolved within the range, summarize the resolution instead of preserving an obsolete plan. Exact quotations may retain the user's original wording, but the surrounding summary must keep its historical meaning clear.
 
 COMPRESSED BLOCK PLACEHOLDERS
 When the selected range includes previously compressed blocks, use this exact placeholder format when referencing one:

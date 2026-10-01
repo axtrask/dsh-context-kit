@@ -1,16 +1,12 @@
 /**
- * Verify that every prompt the model reads equals upstream's, verbatim.
+ * Verify upstream prompt parity and the range tool's intentional local guidance.
  *
- * This is the check that was missing. `verify-parity.mjs` compared config
- * DEFAULTS and tool shapes, so the port could satisfy it completely while telling
- * the model something entirely different: its own four-line policy instead of
- * upstream's `system.ts`, a three-paragraph tool description instead of
- * `compress-range.ts`, and one of three nudges with invented wording. Tool
- * behaviour cannot be 1:1 while the instructions that drive it are not.
- *
- * The comparison is textual and mechanical: extract the template literal from the
- * upstream TypeScript source and require the model-facing text to be
- * byte-identical to the port's constant.
+ * `verify-parity.mjs` compares config defaults and tool shapes, so this separate
+ * gate checks model-facing text. Unadapted prompts remain byte-identical to
+ * upstream. Range mode keeps upstream's structure while adding the port's block
+ * placeholder contract and the locally approved purpose, narrative, failed-attempt,
+ * and temporal-anchoring guidance; `test-dcp-prompt-contract.mjs` pins that local
+ * preamble exactly.
  *
  * Run:  node scripts/verify-dcp-prompts.mjs
  *
@@ -99,11 +95,19 @@ for (const [file, name, constant] of [
 ]) {
   const upstream = normalize(upstreamLiteral(file, name)).trim();
   const port = prompts[constant].trim();
-  check(
-    `${constant} matches upstream verbatim`,
-    upstream === port,
-    upstream === port ? '' : `upstream ${upstream.length} chars vs port ${port.length} chars`
-  );
+  if (constant === 'COMPRESS_RANGE') {
+    check(
+      'COMPRESS_RANGE carries the intentional local guidance',
+      upstream !== port && port.includes('TEMPORAL ANCHORING') && port.includes('Preserve failed attempts'),
+      `upstream ${upstream.length} chars vs port ${port.length} chars`
+    );
+  } else {
+    check(
+      `${constant} matches upstream verbatim`,
+      upstream === port,
+      upstream === port ? '' : `upstream ${upstream.length} chars vs port ${port.length} chars`
+    );
+  }
   const cut = (text) => text.slice(text.indexOf('BATCHING'));
   check(
     `${constant} matches upstream from BATCHING onward`,
