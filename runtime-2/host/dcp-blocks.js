@@ -49,6 +49,17 @@ function restoredStats(raw) {
   };
 }
 
+function restoredLastCompression(raw) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const beforeEstimate = raw.beforeEstimate;
+  const afterEstimate = raw.afterEstimate;
+  const estimatedFreed = raw.estimatedFreed;
+  if (typeof beforeEstimate !== 'number' || !Number.isFinite(beforeEstimate) || beforeEstimate < 0) return undefined;
+  if (typeof afterEstimate !== 'number' || !Number.isFinite(afterEstimate) || afterEstimate < 0) return undefined;
+  if (typeof estimatedFreed !== 'number' || !Number.isFinite(estimatedFreed)) return undefined;
+  return { beforeEstimate, afterEstimate, estimatedFreed };
+}
+
 function restoredNudges(raw) {
   const source = raw !== null && typeof raw === 'object' ? raw : {};
   const strings = (value) => new Set(Array.isArray(value) ? value.filter((entry) => typeof entry === 'string') : []);
@@ -140,6 +151,7 @@ export class DcpBlockState {
     this.manualPermit = seed.manualPermit === true;
     this.manualModeOverride = typeof seed.manualModeOverride === 'boolean' ? seed.manualModeOverride : undefined;
     this.lastCompaction = Number.isInteger(seed.lastCompaction) && seed.lastCompaction >= 0 ? seed.lastCompaction : 0;
+    this.lastCompression = restoredLastCompression(seed.lastCompression);
     this.requestModelKey = typeof seed.requestModelKey === 'string' ? seed.requestModelKey : '';
     this.modelContextLimit = typeof seed.modelContextLimit === 'number' && Number.isFinite(seed.modelContextLimit) ? seed.modelContextLimit : undefined;
     if (Number.isInteger(seed.nextBlockId) && seed.nextBlockId > 0) this.nextBlockId = seed.nextBlockId;
@@ -461,6 +473,7 @@ export class DcpBlockState {
     this.messageIds.nextRef = 1;
     this.nudges = restoredNudges({});
     this.manualPermit = false;
+    this.lastCompression = undefined;
     this.lastCompaction = Number.isInteger(Number(marker)) ? Number(marker) : 0;
     this.requestModelKey = '';
     this.modelContextLimit = undefined;
@@ -542,6 +555,7 @@ export class DcpBlockState {
       manualPermit: this.manualPermit,
       manualModeOverride: this.manualModeOverride,
       lastCompaction: this.lastCompaction,
+      lastCompression: this.lastCompression,
       requestModelKey: this.requestModelKey,
       modelContextLimit: this.modelContextLimit,
       // `deactivatedByUser` rides along on the block objects. It is written

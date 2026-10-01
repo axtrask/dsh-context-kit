@@ -162,6 +162,9 @@ console.log('\n--- the shipped compress limits are upstream\u2019s ---');
   // no default does — silently disables a documented feature for every user who
   // never set it.
   const plain = resolve({});
+  check('model-facing DCP context status defaults off', plain.includeContextStatus === false, JSON.stringify(plain.includeContextStatus));
+  check('model-facing DCP context status can be enabled explicitly', resolve({ includeContextStatus: true }).includeContextStatus === true);
+  check('the DCP file layer can enable model-facing context status', resolve({}, { includeContextStatus: true }).includeContextStatus === true);
   check('compress.maxContextLimit defaults to 100000', plain.compress.maxContextLimit === 100000, JSON.stringify(plain.compress.maxContextLimit));
   check('compress.minContextLimit defaults to 50000', plain.compress.minContextLimit === 50000, JSON.stringify(plain.compress.minContextLimit));
   check('range/allow/show/summary-buffer defaults match upstream', plain.compress.mode === 'range' && plain.compress.permission === 'allow' && plain.compress.showCompression === false && plain.compress.summaryBuffer === true, JSON.stringify(plain.compress));
@@ -412,8 +415,9 @@ console.log('\n--- the extracted module is independent and preserves the plugin 
   const configuration = await import(pathToFileURL(join(kitRoot, 'lib', 'dcp-config.js')).href);
   const expectedExports = [
     'Config', 'DEFAULT_COMPRESS_PROTECTED_TOOLS', 'DEFAULT_PROTECTED_TOOLS',
-    'DcpCompactionEngine', 'apply', 'engineForTest', 'inject', 'installDcpAddon', 'manualModeForTest',
-    'name', 'parseLimitForTest', 'resolveConfigForTest'
+    'DCP_WIRE_STATUS_LABEL', 'DCP_WIRE_STATUS_MAX_CHARS', 'DcpCompactionEngine',
+    'apply', 'engineForTest', 'finalizeDcpWireContext', 'inject', 'installDcpAddon', 'manualModeForTest',
+    'name', 'parseLimitForTest', 'resolveConfigForTest', 'stripDcpWireStatuses'
   ];
   check('the dcp entry retains its legacy exports and exposes the independent addon installer', JSON.stringify(Object.keys(dcp).sort()) === JSON.stringify(expectedExports.sort()));
   check('Config is the same schema object at both import paths', Config === configuration.Config);

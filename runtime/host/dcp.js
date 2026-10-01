@@ -231,19 +231,56 @@ function visibleText(message) {
     .join('');
 }
 
-export const DCP_WIRE_STATUS_LABEL = 'DCP-finalized message estimate';
-export const DCP_WIRE_STATUS_MAX_CHARS = 160;
-const DCP_WIRE_STATUS_REGEX = /<dcp-status>DCP-finalized message estimate: [^<\r\n]{0,80}<\/dcp-status>/gi;
+export const DCP_WIRE_STATUS_LABEL = 'DCP context status';
+export const DCP_WIRE_STATUS_MAX_CHARS = 512;
+const DCP_STATUS_OPEN = '<' + 'dcp-status>';
+const DCP_STATUS_CLOSE = '<' + '/dcp-status>';
+const DCP_WIRE_STATUS_REGEX = new RegExp(`(?:\\r?\\n)?${DCP_STATUS_OPEN}[\\s\\S]*?${DCP_STATUS_CLOSE}`, 'gi');
 const TERMINAL_DCP_MESSAGE_ID_REGEX = /(\n<dcp-message-id(?:\s[^>]*)?>(?:m(?:000[1-9]|00[1-9]\d|0[1-9]\d{2}|[1-9]\d{3,4})|b[1-9]\d*)<\/dcp-message-id>\s*)$/i;
+const DCP_STATUS_EXPLANATION = 'DCP \u0437\u0430\u043c\u0435\u043d\u044f\u0435\u0442 \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d\u043d\u044b\u0435 \u0447\u0430\u0441\u0442\u0438 \u0434\u0438\u0430\u043b\u043e\u0433\u0430 \u043a\u043e\u0440\u043e\u0442\u043a\u0438\u043c\u0438 \u0441\u0432\u043e\u0434\u043a\u0430\u043c\u0438. \u0427\u0438\u0441\u043b\u0430 \u043f\u0440\u0438\u043c\u0435\u0440\u043d\u044b\u0435.';
+const DCP_STATUS_REQUEST = '\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f \u0432 \u0437\u0430\u043f\u0440\u043e\u0441\u0435:';
+const DCP_STATUS_LAST = '\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u0435 \u0441\u0436\u0430\u0442\u0438\u0435:';
+const DCP_STATUS_SPAN = '\u0443\u0447\u0430\u0441\u0442\u043e\u043a';
+const DCP_STATUS_SUMMARY = '\u0441\u0432\u043e\u0434\u043a\u0430';
+const DCP_STATUS_FREED = '\u041e\u0441\u0432\u043e\u0431\u043e\u0436\u0434\u0435\u043d\u043e:';
+const DCP_STATUS_NEVER = '\u0435\u0449\u0451 \u043d\u0435 \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u043b\u043e\u0441\u044c';
+const DCP_STATUS_UNAVAILABLE = '\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e';
 
-function wireStatusText(estimate) {
-  const value = typeof estimate === 'number' && Number.isFinite(estimate)
-    ? `~${Math.max(0, Math.ceil(estimate))} tokens`
-    : 'unavailable';
-  const status = `<dcp-status>${DCP_WIRE_STATUS_LABEL}: ${value}</dcp-status>`;
-  return status.length <= DCP_WIRE_STATUS_MAX_CHARS
-    ? status
-    : `<dcp-status>${DCP_WIRE_STATUS_LABEL}: unavailable</dcp-status>`;
+function compactTokenCount(value) {
+  const amount = Math.round(Number(value));
+  if (!Number.isFinite(amount)) return DCP_STATUS_UNAVAILABLE;
+  const compact = (divisor, suffix) => `${(amount / divisor).toFixed(1).replace(/\.0$/, '')}${suffix}`;
+  if (Math.abs(amount) >= 1_000_000) return compact(1_000_000, 'M');
+  if (Math.abs(amount) >= 1_000) return compact(1_000, 'K');
+  return String(amount);
+}
+
+function validCompressionTelemetry(value) {
+  return value !== null && typeof value === 'object'
+    && typeof value.beforeEstimate === 'number' && Number.isFinite(value.beforeEstimate) && value.beforeEstimate >= 0
+    && typeof value.afterEstimate === 'number' && Number.isFinite(value.afterEstimate) && value.afterEstimate >= 0
+    && typeof value.estimatedFreed === 'number' && Number.isFinite(value.estimatedFreed);
+}
+
+function wireStatusText(estimate, lastCompression) {
+  const lines = [
+    DCP_STATUS_OPEN,
+    DCP_STATUS_EXPLANATION,
+    `${DCP_STATUS_REQUEST} ${Number.isFinite(estimate) ? `~${compactTokenCount(estimate)}` : DCP_STATUS_UNAVAILABLE}`
+  ];
+  if (validCompressionTelemetry(lastCompression)) {
+    const percent = lastCompression.beforeEstimate > 0
+      ? ` (${Math.round(lastCompression.estimatedFreed / lastCompression.beforeEstimate * 100)}%)`
+      : '';
+    lines.push(`${DCP_STATUS_LAST} ${DCP_STATUS_SPAN} ${compactTokenCount(lastCompression.beforeEstimate)} \u2192 ${DCP_STATUS_SUMMARY} ${compactTokenCount(lastCompression.afterEstimate)}`);
+    lines.push(`${DCP_STATUS_FREED} ~${compactTokenCount(lastCompression.estimatedFreed)}${percent}`);
+  } else {
+    lines.push(`${DCP_STATUS_LAST} ${DCP_STATUS_NEVER}`);
+  }
+  lines.push(DCP_STATUS_CLOSE);
+  const status = `\n${lines.join('\n')}`;
+  if (status.length <= DCP_WIRE_STATUS_MAX_CHARS) return status;
+  return `\n${DCP_STATUS_OPEN}\n${DCP_STATUS_LAST} ${DCP_STATUS_NEVER}\n${DCP_STATUS_CLOSE}`;
 }
 
 /** Remove every wire-only status before measuring or replacing it. */
@@ -350,8 +387,18 @@ function estimateWireMessages(meter, messages) {
 }
 
 /** Finalize the provider-bound projection with one non-persistent estimate status. */
-export function finalizeDcpWireContext(messages, meter) {
+export function finalizeDcpWireContext(messages, meter, options = {}) {
   const statusFree = stripDcpWireStatuses(messages);
+  if (options.enabled !== true) {
+    return {
+      messages: statusFree.messages,
+      statusFreeEstimate: undefined,
+      finalizedEstimate: undefined,
+      statusCost: 0,
+      visible: false,
+      stripped: statusFree.stripped
+    };
+  }
   let statusFreeEstimate;
   try {
     statusFreeEstimate = estimateWireMessages(meter, statusFree.messages);
@@ -371,7 +418,7 @@ export function finalizeDcpWireContext(messages, meter) {
   }
 
   if (statusFreeEstimate === undefined) {
-    const fallback = insertDcpWireStatus(statusFree.messages, wireStatusText(undefined));
+    const fallback = insertDcpWireStatus(statusFree.messages, wireStatusText(undefined, options.lastCompression));
     return {
       messages: fallback.messages,
       statusFreeEstimate: undefined,
@@ -382,7 +429,7 @@ export function finalizeDcpWireContext(messages, meter) {
     };
   }
 
-  const provisional = insertDcpWireStatus(statusFree.messages, wireStatusText(statusFreeEstimate));
+  const provisional = insertDcpWireStatus(statusFree.messages, wireStatusText(statusFreeEstimate, options.lastCompression));
   if (provisional.messageIndex < 0) {
     return {
       messages: statusFree.messages,
@@ -401,7 +448,7 @@ export function finalizeDcpWireContext(messages, meter) {
     advertisedEstimate = undefined;
   }
   if (advertisedEstimate === undefined) {
-    const fallback = insertDcpWireStatus(statusFree.messages, wireStatusText(undefined));
+    const fallback = insertDcpWireStatus(statusFree.messages, wireStatusText(undefined, options.lastCompression));
     return {
       messages: fallback.messages,
       statusFreeEstimate: undefined,
@@ -414,7 +461,7 @@ export function finalizeDcpWireContext(messages, meter) {
 
   // One provisional measurement prices the status. The displayed approximation is
   // not recursively regenerated if its own digits alter that price.
-  const finalized = insertDcpWireStatus(statusFree.messages, wireStatusText(advertisedEstimate));
+  const finalized = insertDcpWireStatus(statusFree.messages, wireStatusText(advertisedEstimate, options.lastCompression));
   let finalizedEstimate = advertisedEstimate;
   try {
     finalizedEstimate = estimateWireMessages(meter, finalized.messages) ?? advertisedEstimate;
@@ -2711,6 +2758,11 @@ function registerSurface(ctx, engine, legacyEditor = true) {
       }
 
       engine.clearNudgeAnchors(session, true);
+      sessionState.lastCompression = {
+        beforeEstimate: shadowedTokens,
+        afterEstimate,
+        estimatedFreed: shadowedTokens - afterEstimate
+      };
       engine.saveBlocks(session);
       const swept = engine.pruneSession(session, agent, { nudge: false });
 
@@ -2822,7 +2874,10 @@ function registerSurface(ctx, engine, legacyEditor = true) {
     transformed = applyWireToolInputPruning(transformed, state);
     transformed = injectPendingNudge(session, state, engine, transformed);
     const injected = injectMessageReferences(session, state, transformed, { sanitize: false });
-    const finalized = finalizeDcpWireContext(injected.messages, engine.ctx.tokenMeter);
+    const finalized = finalizeDcpWireContext(injected.messages, engine.ctx.tokenMeter, {
+      enabled: engine.dcpConfig.includeContextStatus === true,
+      lastCompression: state.lastCompression
+    });
     engine.recordWireEstimate(session, {
       statusFreeEstimate: finalized.statusFreeEstimate,
       finalizedEstimate: finalized.finalizedEstimate,
