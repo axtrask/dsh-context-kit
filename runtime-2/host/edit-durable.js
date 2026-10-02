@@ -136,7 +136,8 @@ export function effectiveEditableIndex(session, edits = []) {
   const plan = planWireRewrite(entries.map((entry) => entry.message), edits);
   const applied = new Map(plan.applied.map((edit) => [edit.id, edit]));
   const refused = new Set(plan.refused.map((edit) => edit.id));
-  return entries.map((entry, index) => {
+  return plan.origins.map((originIndex, index) => {
+    const entry = entries[originIndex];
     let originSeq = entry.seq;
     let origin = entry.message;
     let event = session.eventAt?.(originSeq) ?? session.log?.[originSeq];
@@ -161,8 +162,8 @@ export function effectiveEditableIndex(session, edits = []) {
       event = source;
     }
     const durable = originSeq !== entry.seq;
-    const history = edits.filter((edit) => applied.get(edit.id)?.index === index
-      || (edit.messageId !== undefined && entry.id !== undefined && String(edit.messageId) === String(entry.id)));
+    const history = edits.filter((edit) => edit.kind !== 'delete-turn' && (applied.get(edit.id)?.originIndex === originIndex
+      || (edit.messageId !== undefined && entry.id !== undefined && String(edit.messageId) === String(entry.id))));
     const message = plan.messages[index];
     const metadata = (at) => {
       const here = at === undefined ? history : history.filter((edit) => edit.cursor.block === at);

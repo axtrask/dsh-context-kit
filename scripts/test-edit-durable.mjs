@@ -205,8 +205,8 @@ console.log('--- a durable edit of the user\'s own message ---');
   );
   check(
     'the tool result still follows its call',
-    providerView(session)[2]?.content?.[0]?.toolCallId === 'c1',
-    JSON.stringify(providerView(session)[2]?.content?.[0]?.toolCallId ?? null)
+    providerView(session)[2]?.toolCallId === 'c1',
+    JSON.stringify(providerView(session)[2]?.toolCallId ?? null)
   );
 
   /* --- what the log kept --- */

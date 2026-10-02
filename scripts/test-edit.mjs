@@ -35,9 +35,11 @@ function check(name, ok, detail = '') {
 const text = (value) => ({ type: 'text', text: value });
 const call = (id, name, args) => ({ type: 'tool-call', id, name, arguments: args });
 const result = (callId, body) => ({ type: 'tool-result', toolCallId: callId, content: [text(body)], isError: false });
-const userMessage = (id, ...blocks) => ({ id, role: 'user', content: blocks });
-const assistantMessage = (id, ...blocks) => ({ id, role: 'assistant', content: blocks });
-const resultMessage = (id, callId, body) => ({ id, role: 'user', content: [result(callId, body)] });
+const userMessage = (id, ...blocks) => ({ id, role: 'user', content: blocks, source: { kind: 'user' } });
+const assistantMessage = (id, ...blocks) => ({ id, role: 'assistant', content: blocks, source: { kind: 'model' } });
+const resultMessage = (id, callId, body) => ({
+  id, role: 'user', content: [result(callId, body)], source: { kind: 'tool', callId }
+});
 
 /** A frozen request, the way `dsh-agent-loop` hands it to the waterfall. */
 function freezeRequest(messages, sessionId = 'edit-test') {
@@ -657,6 +659,117 @@ const noPredecessor = edit.planWireRewrite([chainOriginal], [{ ...chainSecond.ed
 check('a chain with a missing predecessor is refused', noPredecessor.applied.length === 0 && noPredecessor.refused.length === 1);
 const foreignChain = edit.planWireRewrite([{ ...chainOriginal, id: 'other-message' }], chainRecords);
 check('effective chains preserve message identity guards', foreignChain.applied.length === 0 && foreignChain.refused.length === chainRecords.length);
+
+/* ----------------------------------------------- whole-turn deletion overlay */
+
+const turnMessages = freezeRequest([
+  { id: 'sys', role: 'system', content: 'SYSTEM' },
+  userMessage('u1', text('First question')),
+  assistantMessage('a1-call', text('Checking'), call('turn-call', 'read', '{}')),
+  resultMessage('r1', 'turn-call', 'TOOL BODY'),
+  assistantMessage('a1-final', text('First answer')),
+  userMessage('u2', text('Second question')),
+  assistantMessage('a2', text('Second answer')),
+  userMessage('u3', text('Third question'))
+], 'delete-turns').messages;
+
+let deleteStore = edit.createEditStore({ restore: false });
+const firstDelete = deleteStore.deleteTurn('delete-first', turnMessages, {
+  messageIndex: 1, messageId: 'u1', expected: 'First question'
+});
+check('a user turn deletion is recorded as an effective tombstone', firstDelete.ok === true
+  && firstDelete.edit?.kind === 'delete-turn' && firstDelete.edit?.basis === 'effective');
+const firstPlan = edit.planWireRewrite(turnMessages, deleteStore.editsFor('delete-first'));
+check('deleting the first turn removes its complete assistant and tool group',
+  firstPlan.messages.map((message) => message.id).join(',') === 'sys,u2,a2,u3',
+  firstPlan.messages.map((message) => message.id).join(','));
+check('turn deletion reports stable provenance for every removed message',
+  firstPlan.applied[0]?.originIndex === 1
+    && firstPlan.applied[0]?.removedOrigins?.join(',') === '1,2,3,4'
+    && firstPlan.origins.join(',') === '0,5,6,7', JSON.stringify(firstPlan));
+
+const persistedDelete = edit.createEditStore().editsFor('delete-first');
+const persistedPlan = edit.planWireRewrite(turnMessages, persistedDelete);
+check('a deletion tombstone survives store reload', persistedDelete.length === 1
+  && persistedDelete[0]?.kind === 'delete-turn'
+  && persistedPlan.messages.map((message) => message.id).join(',') === 'sys,u2,a2,u3');
+
+const middleStore = edit.createEditStore({ restore: false });
+middleStore.deleteTurn('delete-middle', turnMessages, { messageIndex: 5, messageId: 'u2', expected: 'Second question' });
+const middlePlan = edit.planWireRewrite(turnMessages, middleStore.editsFor('delete-middle'));
+check('deleting a middle turn stops immediately before the next human user message',
+  middlePlan.messages.map((message) => message.id).join(',') === 'sys,u1,a1-call,r1,a1-final,u3');
+
+const lastStore = edit.createEditStore({ restore: false });
+lastStore.deleteTurn('delete-last', turnMessages, { messageIndex: 7, messageId: 'u3', expected: 'Third question' });
+const lastPlan = edit.planWireRewrite(turnMessages, lastStore.editsFor('delete-last'));
+check('deleting the last turn removes through the end of the request',
+  lastPlan.messages.map((message) => message.id).join(',') === 'sys,u1,a1-call,r1,a1-final,u2,a2');
+
+const finalHistory = [...turnMessages, assistantMessage('a3', text('Third answer'))];
+const finalStore = edit.createEditStore({ restore: false });
+finalStore.deleteTurn('delete-final-stable', finalHistory, { messageIndex: 7, messageId: 'u3', expected: 'Third question' });
+const withFuturePrompt = [...finalHistory, userMessage('u4', text('Future question'))];
+const futurePlan = edit.planWireRewrite(withFuturePrompt, finalStore.editsFor('delete-final-stable'));
+check('a final-turn tombstone never expands onto a future user prompt',
+  futurePlan.messages.map((message) => message.id).join(',') === 'sys,u1,a1-call,r1,a1-final,u2,a2,u4');
+
+const syntheticUser = {
+  id: 'goal-continue', role: 'user', content: [text('Continue toward the goal')], source: { kind: 'goal' }
+};
+const syntheticHistory = [
+  userMessage('direct-1', text('Do the work')),
+  assistantMessage('model-1', text('Part one')),
+  syntheticUser,
+  assistantMessage('model-2', text('Part two')),
+  userMessage('direct-2', text('A new human request'))
+];
+const syntheticStore = edit.createEditStore({ restore: false });
+syntheticStore.deleteTurn('delete-synthetic', syntheticHistory, {
+  messageIndex: 0, messageId: 'direct-1', expected: 'Do the work'
+});
+const syntheticPlan = edit.planWireRewrite(syntheticHistory, syntheticStore.editsFor('delete-synthetic'));
+check('synthetic user-role continuations stay inside the deleted human turn',
+  syntheticPlan.messages.map((message) => message.id).join(',') === 'direct-2');
+
+const changedMembers = [...finalHistory];
+changedMembers.splice(8, 0, assistantMessage('inserted', text('Unexpected insertion')));
+const changedMemberPlan = edit.planWireRewrite(changedMembers, finalStore.editsFor('delete-final-stable'));
+check('an inserted member makes the whole deletion refuse atomically',
+  changedMemberPlan.applied.length === 0 && changedMemberPlan.refused.length === 1
+    && changedMemberPlan.messages.length === changedMembers.length);
+
+const incompleteToolTurn = [
+  userMessage('tool-user', text('Run it')),
+  assistantMessage('orphan-call', call('orphan', 'read', '{}'))
+];
+const incompleteDelete = edit.createEditStore({ restore: false }).deleteTurn('delete-incomplete-tool', incompleteToolTurn, {
+  messageIndex: 0, messageId: 'tool-user', expected: 'Run it'
+});
+check('a deletion with an unpaired tool call is refused before persistence',
+  incompleteDelete.ok === false && /missing or ambiguous/u.test(String(incompleteDelete.reason)));
+
+const staleDelete = edit.createEditStore({ restore: false }).deleteTurn('delete-stale', turnMessages, {
+  messageIndex: 1, messageId: 'u1', expected: 'Old question text'
+});
+check('a stale delete coordinate is refused before persistence', staleDelete.ok === false && /aimed at/u.test(String(staleDelete.reason)));
+const renamedDeleteTarget = turnMessages.map((message) => message.id === 'u1' ? { ...message, id: 'foreign-u1' } : message);
+const renamedDeletePlan = edit.planWireRewrite(renamedDeleteTarget, persistedDelete);
+check('a deletion never moves onto a same-text message with a different id',
+  renamedDeletePlan.applied.length === 0 && renamedDeletePlan.refused.length === 1
+    && renamedDeletePlan.messages.length === turnMessages.length);
+
+const mixedStore = edit.createEditStore({ restore: false });
+mixedStore.deleteTurn('delete-then-edit', turnMessages, { messageIndex: 1, messageId: 'u1', expected: 'First question' });
+mixedStore.record('delete-then-edit', turnMessages[6], 'Second answer edited', {
+  messageIndex: 2, messageId: 'a2', expected: 'Second answer', basis: 'effective'
+});
+const mixedDeletePlan = edit.planWireRewrite(turnMessages, mixedStore.editsFor('delete-then-edit'));
+check('an effective edit after deletion uses the compacted index but keeps original provenance',
+  mixedDeletePlan.messages[2]?.id === 'a2'
+    && mixedDeletePlan.messages[2]?.content?.[0]?.text === 'Second answer edited'
+    && mixedDeletePlan.applied[1]?.index === 2 && mixedDeletePlan.applied[1]?.originIndex === 6,
+  JSON.stringify(mixedDeletePlan.applied));
 
 console.log(`\n${failures.length === 0 ? 'all edit behaviour tests passed' : `${failures.length} FAILURES: ${failures.join('; ')}`}`);
 process.exit(failures.length === 0 ? 0 : 1);

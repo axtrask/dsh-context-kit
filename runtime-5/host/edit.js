@@ -63,6 +63,9 @@ export const EDITABLE_BLOCK_KINDS = ['text', 'tool-call', 'tool-result', 'reason
 /** What a single edit changes. */
 export const EDIT_SCOPE = { TEXT: 'text', ARGS: 'toolArguments' };
 
+/** Persisted wire-overlay record that removes one complete conversational turn. */
+export const DELETE_TURN_KIND = 'delete-turn';
+
 /* ------------------------------------------------------------- text blocks */
 
 /**
@@ -384,6 +387,58 @@ export function createEdit({ sessionId, index, message, newText, at, expected, b
 }
 
 /**
+ * Build a persisted tombstone for one human turn.
+ *
+ * A tombstone is always evaluated against the effective provider history. It keeps
+ * the complete text vector as well as the ordinary structural anchor, so a stale
+ * panel cannot delete a same-shaped message whose contents changed in the meantime.
+ */
+export function createTurnDeletion({ messages, index, at, expected }) {
+  const list = Array.isArray(messages) ? messages : [];
+  const message = list[index];
+  if (!startsHumanTurn(message)) return { ok: false, reason: 'only a direct user message can anchor a turn deletion' };
+  const texts = canonicalTexts(message);
+  const before = texts.join('');
+  if (texts.length === 0 || before.length === 0) {
+    return { ok: false, reason: 'the user message is empty and cannot anchor a turn deletion' };
+  }
+  if (expected !== undefined && expected !== before) {
+    return { ok: false, reason: 'the message is not the text this deletion was aimed at' };
+  }
+  let end = index + 1;
+  while (end < list.length && !startsHumanTurn(list[end])) end += 1;
+  const members = [];
+  for (let cursor = index; cursor < end; cursor += 1) {
+    const member = deletionSnapshot(list[cursor]);
+    if (member === undefined) {
+      return { ok: false, reason: `message ${cursor} in this turn has no stable id` };
+    }
+    members.push(member);
+  }
+  const next = end < list.length ? deletionSnapshot(list[end]) : null;
+  if (end < list.length && next === undefined) {
+    return { ok: false, reason: 'the next user message has no stable id' };
+  }
+  const closure = validateToolClosure(list, index, end);
+  if (closure !== undefined) return { ok: false, reason: closure };
+  return {
+    ok: true,
+    edit: {
+      kind: DELETE_TURN_KIND,
+      id: `d${(at ?? 0).toString(36)}`,
+      parent: null,
+      basis: 'effective',
+      before,
+      texts,
+      members,
+      next,
+      at: at ?? 0,
+      anchor: messageAnchor(message, index)
+    }
+  };
+}
+
+/**
  * The provisional anchor for a message: where it was, what role it had, and the
  * identity of every block in order. This is what lets a later request be searched
  * for the same message instead of trusting a stale index.
@@ -490,6 +545,99 @@ export function findAnchoredIndex(messages, edit) {
   return { reason: 'the message this edit replaced is no longer part of the request' };
 }
 
+function deletionSnapshot(message) {
+  if (message?.id === undefined || message?.id === null || String(message.id).length === 0) return undefined;
+  return {
+    id: message.id,
+    role: message.role,
+    sourceKind: message.source?.kind,
+    blocks: messageAnchor(message, 0).blocks
+  };
+}
+
+function sameDeletionSnapshot(message, snapshot) {
+  const actual = deletionSnapshot(message);
+  if (actual === undefined || snapshot === null || typeof snapshot !== 'object') return false;
+  return String(actual.id) === String(snapshot.id)
+    && actual.role === snapshot.role
+    && actual.sourceKind === snapshot.sourceKind
+    && actual.blocks.length === snapshot.blocks?.length
+    && actual.blocks.every((block, index) => identityKey(block) === identityKey(snapshot.blocks[index]));
+}
+
+function validateToolClosure(messages, start, end) {
+  const calls = new Map();
+  const results = new Map();
+  for (const [index, message] of messages.entries()) {
+    for (const block of (Array.isArray(message?.content) ? message.content : [])) {
+      if (block?.type === 'tool-call' && typeof block.id === 'string') {
+        const positions = calls.get(block.id) ?? [];
+        positions.push(index);
+        calls.set(block.id, positions);
+      }
+      if (block?.type === 'tool-result' && typeof block.toolCallId === 'string') {
+        const positions = results.get(block.toolCallId) ?? [];
+        positions.push(index);
+        results.set(block.toolCallId, positions);
+      }
+    }
+  }
+  for (const id of new Set([...calls.keys(), ...results.keys()])) {
+    const callPositions = calls.get(id) ?? [];
+    const resultPositions = results.get(id) ?? [];
+    const callInside = callPositions.some((index) => index >= start && index < end);
+    const resultInside = resultPositions.some((index) => index >= start && index < end);
+    if (!callInside && !resultInside) continue;
+    if (callPositions.length !== 1 || resultPositions.length !== 1) {
+      return `tool interaction ${id} is missing or ambiguous`;
+    }
+    if (callInside !== resultInside) return `tool interaction ${id} crosses the deletion boundary`;
+  }
+  return undefined;
+}
+
+function deletionClaims(edit, message) {
+  if (!startsHumanTurn(message) || !sameDeletionSnapshot(message, edit.members?.[0])) return false;
+  const texts = canonicalTexts(message);
+  return texts.length === edit.texts.length && texts.every((text, index) => text === edit.texts[index]);
+}
+
+function findDeletionIndex(messages, edit) {
+  const at = edit.anchor.index;
+  if (Number.isInteger(at) && at >= 0 && at < messages.length && deletionClaims(edit, messages[at])) {
+    return { index: at, recovered: false };
+  }
+  const hits = [];
+  for (let index = 0; index < messages.length; index += 1) {
+    if (deletionClaims(edit, messages[index])) hits.push(index);
+  }
+  if (hits.length === 1) return { index: hits[0], recovered: true };
+  if (hits.length > 1) {
+    return { reason: `the deleted text now appears in ${hits.length} user messages (${hits.join(', ')}); refusing to guess` };
+  }
+  return { reason: 'the user message this deletion targeted is no longer part of the request' };
+}
+
+function validateDeletionSlice(messages, edit, start) {
+  const members = edit.members;
+  const end = start + members.length;
+  if (end > messages.length) return { reason: 'the recorded turn is no longer complete' };
+  for (let offset = 0; offset < members.length; offset += 1) {
+    if (!sameDeletionSnapshot(messages[start + offset], members[offset])) {
+      return { reason: `message ${offset} of the recorded turn changed identity or order` };
+    }
+  }
+  if (edit.next !== null && !sameDeletionSnapshot(messages[end], edit.next)) {
+    return { reason: 'the next user-message boundary changed' };
+  }
+  const closure = validateToolClosure(messages, start, end);
+  return closure === undefined ? { end } : { reason: closure };
+}
+
+function startsHumanTurn(message) {
+  return message?.role === 'user' && message?.source?.kind === 'user';
+}
+
 /**
  * The wire overlay: rebuild a request so that stored edits are what the provider
  * receives.
@@ -505,38 +653,74 @@ export function findAnchoredIndex(messages, edit) {
 export function planWireRewrite(messages, edits, options = {}) {
   const list = Array.isArray(messages) ? messages : [];
   const pending = Array.isArray(edits) ? edits.filter((edit) => edit !== null && typeof edit === 'object') : [];
-  if (pending.length === 0) return { ok: true, messages: list, applied: [], refused: [], changed: false };
+  const origins = list.map((_message, index) => index);
+  if (pending.length === 0) {
+    return { ok: true, messages: list, origins, applied: [], refused: [], changed: false };
+  }
 
   const refused = [];
   const applied = [];
   const next = [...list];
+  const refuse = (edit, reason) => {
+    refused.push({ id: edit.id, kind: edit.kind, reason, after: edit.after });
+    options.onRefused?.(edit, reason);
+  };
   for (const edit of pending) {
+    const deletion = edit.kind === DELETE_TURN_KIND;
     // Only new, opt-in records chain from earlier edits. Persisted v1 records
     // without a basis keep their original-message guards and last-write behavior.
-    const basis = edit.basis === 'effective' ? next : list;
-    const found = findAnchoredIndex(basis, edit);
+    const effectiveBasis = deletion || edit.basis === 'effective';
+    const basis = effectiveBasis ? next : list;
+    const found = deletion ? findDeletionIndex(basis, edit) : findAnchoredIndex(basis, edit);
     if (found.reason !== undefined) {
-      refused.push({ id: edit.id, reason: found.reason, after: edit.after });
-      options.onRefused?.(edit, found.reason);
+      refuse(edit, found.reason);
+      continue;
+    }
+    const currentIndex = effectiveBasis ? found.index : origins.indexOf(found.index);
+    if (currentIndex < 0 || currentIndex >= next.length) {
+      refuse(edit, 'the message this edit targeted was removed by an earlier turn deletion');
       continue;
     }
     if (basis[found.index]?.id !== undefined && edit.messageId !== undefined
       && String(basis[found.index].id) !== String(edit.messageId)) {
       // Same content, different message identity: the id is the strongest anchor
       // available and disagreeing with it means the request was rebuilt.
-      refused.push({ id: edit.id, reason: `message id changed: expected ${edit.messageId}, found ${basis[found.index].id}`, after: edit.after });
+      refuse(edit, `message id changed: expected ${edit.messageId}, found ${basis[found.index].id}`);
+      continue;
+    }
+    if (deletion) {
+      const slice = validateDeletionSlice(next, edit, currentIndex);
+      if (slice.reason !== undefined) {
+        refuse(edit, slice.reason);
+        continue;
+      }
+      const removedOrigins = origins.slice(currentIndex, slice.end);
+      const removedIds = next.slice(currentIndex, slice.end).map((message) => message?.id).filter((id) => id !== undefined);
+      next.splice(currentIndex, slice.end - currentIndex);
+      origins.splice(currentIndex, slice.end - currentIndex);
+      applied.push({
+        id: edit.id,
+        kind: DELETE_TURN_KIND,
+        index: currentIndex,
+        originIndex: removedOrigins[0],
+        removedOrigins,
+        removedIds,
+        messageId: edit.messageId,
+        recovered: found.recovered,
+        before: edit.before
+      });
       continue;
     }
     const validated = validateEdit(basis[found.index], edit);
     if (!validated.ok) {
-      refused.push({ id: edit.id, reason: validated.reason, after: edit.after });
-      options.onRefused?.(edit, validated.reason);
+      refuse(edit, validated.reason);
       continue;
     }
-    next[found.index] = applyEditToMessage(next[found.index], edit, validated.blockIndex, found.index);
+    next[currentIndex] = applyEditToMessage(next[currentIndex], edit, validated.blockIndex, currentIndex);
     applied.push({
       id: edit.id,
-      index: found.index,
+      index: currentIndex,
+      originIndex: origins[currentIndex],
       block: validated.blockIndex,
       recovered: found.recovered,
       before: edit.before,
@@ -545,7 +729,7 @@ export function planWireRewrite(messages, edits, options = {}) {
   }
 
   const changed = applied.length > 0;
-  return { ok: refused.length === 0, messages: changed ? next : list, applied, refused, changed };
+  return { ok: refused.length === 0, messages: changed ? next : list, origins, applied, refused, changed };
 }
 
 /* ------------------------------------------------------------ wire listener */
@@ -705,24 +889,11 @@ export function loadEdits(sessionId) {
   return { edits, problems };
 }
 
-function describeMalformedEdit(edit) {
-  if (edit === null || typeof edit !== 'object') return 'not an object';
-  if (typeof edit.id !== 'string' || edit.id.length === 0) return 'no id';
-  if (edit.messageId !== undefined && typeof edit.messageId !== 'string' && !Number.isFinite(edit.messageId)) return 'invalid message id';
-  if (typeof edit.before !== 'string') return 'no before text';
-  if (typeof edit.after !== 'string' || edit.after.length === 0) return 'no after text';
-  if (edit.basis !== undefined && edit.basis !== 'effective') return 'unknown edit basis';
-  if (!Number.isInteger(edit.at) || edit.at < 0) return 'no ordering cursor';
-  if (edit.cursor === null || typeof edit.cursor !== 'object') return 'no cursor';
-  if (!Number.isInteger(edit.cursor.block)) return 'no block cursor';
-  const anchor = edit.anchor;
+function malformedAnchor(anchor) {
   if (anchor === null || typeof anchor !== 'object') return 'no anchor';
   if (typeof anchor.role !== 'string' || anchor.role.length === 0) return 'anchor has no role';
   if (!Array.isArray(anchor.blocks)) return 'anchor has no block list';
   if (!Number.isInteger(anchor.index) || anchor.index < 0) return 'anchor has no index';
-  if (anchor.blocks.length === 0 ? edit.cursor.block !== -1 : edit.cursor.block < 0 || edit.cursor.block >= anchor.blocks.length) {
-    return 'block cursor outside anchor block list';
-  }
   // The planner reads every block identity, including blocks not selected for editing.
   for (const [index, block] of anchor.blocks.entries()) {
     if (block === null || typeof block !== 'object' || Array.isArray(block)
@@ -731,6 +902,63 @@ function describeMalformedEdit(edit) {
       return `anchor block ${index} has invalid identity`;
     }
     if (block.signed !== undefined && typeof block.signed !== 'boolean') return `anchor block ${index} has invalid signed flag`;
+  }
+  return undefined;
+}
+
+function malformedDeletionSnapshot(snapshot, label) {
+  if (snapshot === null || typeof snapshot !== 'object') return `${label} is not an object`;
+  if (snapshot.id === undefined || snapshot.id === null || String(snapshot.id).length === 0) return `${label} has no id`;
+  if (typeof snapshot.role !== 'string' || snapshot.role.length === 0) return `${label} has no role`;
+  if (snapshot.sourceKind !== undefined && typeof snapshot.sourceKind !== 'string') return `${label} has invalid source kind`;
+  return malformedAnchor({ role: snapshot.role, blocks: snapshot.blocks, index: 0 });
+}
+
+function describeMalformedEdit(edit) {
+  if (edit === null || typeof edit !== 'object') return 'not an object';
+  if (typeof edit.id !== 'string' || edit.id.length === 0) return 'no id';
+  if (edit.messageId !== undefined && typeof edit.messageId !== 'string' && !Number.isFinite(edit.messageId)) return 'invalid message id';
+  if (typeof edit.before !== 'string') return 'no before text';
+  if (edit.kind === DELETE_TURN_KIND) {
+    if (!Number.isInteger(edit.at) || edit.at < 0) return 'no ordering cursor';
+    const anchorProblem = malformedAnchor(edit.anchor);
+    if (anchorProblem !== undefined) return anchorProblem;
+    if (edit.basis !== 'effective') return 'turn deletion is not effective-basis';
+    if (edit.anchor.role !== 'user') return 'turn deletion anchor is not a user message';
+    if (!Array.isArray(edit.texts) || edit.texts.length === 0
+      || edit.texts.some((text) => typeof text !== 'string')) return 'turn deletion has no text vector';
+    if (edit.texts.join('') !== edit.before) return 'turn deletion text vector disagrees with before text';
+    if (!Array.isArray(edit.members) || edit.members.length === 0) return 'turn deletion has no member list';
+    const ids = new Set();
+    for (const [index, member] of edit.members.entries()) {
+      const problem = malformedDeletionSnapshot(member, `turn member ${index}`);
+      if (problem !== undefined) return problem;
+      const id = String(member.id);
+      if (ids.has(id)) return 'turn deletion has duplicate member ids';
+      ids.add(id);
+    }
+    if (edit.next !== null) {
+      const problem = malformedDeletionSnapshot(edit.next, 'next turn boundary');
+      if (problem !== undefined) return problem;
+      if (edit.next.role !== 'user' || edit.next.sourceKind !== 'user') return 'next turn boundary is not a direct user message';
+      if (ids.has(String(edit.next.id))) return 'next turn boundary duplicates a member id';
+    }
+    if (edit.members[0].role !== 'user' || edit.members[0].sourceKind !== 'user') {
+      return 'first turn member is not a direct user message';
+    }
+    return undefined;
+  }
+  if (edit.kind !== undefined) return 'unknown edit kind';
+  if (typeof edit.after !== 'string' || edit.after.length === 0) return 'no after text';
+  if (edit.basis !== undefined && edit.basis !== 'effective') return 'unknown edit basis';
+  if (!Number.isInteger(edit.at) || edit.at < 0) return 'no ordering cursor';
+  if (edit.cursor === null || typeof edit.cursor !== 'object') return 'no cursor';
+  if (!Number.isInteger(edit.cursor.block)) return 'no block cursor';
+  const anchorProblem = malformedAnchor(edit.anchor);
+  if (anchorProblem !== undefined) return anchorProblem;
+  if (edit.anchor.blocks.length === 0 ? edit.cursor.block !== -1
+    : edit.cursor.block < 0 || edit.cursor.block >= edit.anchor.blocks.length) {
+    return 'block cursor outside anchor block list';
   }
   return undefined;
 }
@@ -798,6 +1026,25 @@ export function createEditStore(options = {}) {
       if (extras.basis === 'effective') created.edit.basis = 'effective';
       created.edit.messageId = extras.messageId;
       created.edit.id = `${state.sessionId.slice(0, 8)}-e${state.nextId}`;
+      state.nextId += 1;
+      state.edits = [...state.edits, created.edit];
+      saveEdits(state.sessionId, state);
+      return created;
+    },
+
+    /** Record a wire-overlay tombstone for one complete user turn. */
+    deleteTurn(sessionId, messages, extras = {}) {
+      const state = stateOf(sessionId);
+      counter += 1;
+      const created = createTurnDeletion({
+        messages,
+        index: extras.messageIndex ?? 0,
+        at: counter,
+        expected: extras.expected
+      });
+      if (!created.ok) return created;
+      created.edit.messageId = extras.messageId;
+      created.edit.id = `${state.sessionId.slice(0, 8)}-d${state.nextId}`;
       state.nextId += 1;
       state.edits = [...state.edits, created.edit];
       saveEdits(state.sessionId, state);
