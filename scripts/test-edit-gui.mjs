@@ -329,14 +329,18 @@ ok('the classic client factory follows real Cordis service scope and observable 
     assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), 'A');
     for (const listener of listeners) listener();
     assert.deepEqual(notifications, ['A'], 'unrelated list changes must not trigger repeated panel fetches');
-    snapshot = { current: 'B' }; for (const listener of listeners) listener();
-    assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), 'B');
+    snapshot = { current: { sessionId: 'B' } }; for (const listener of listeners) listener();
+    assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), 'B', 'the real object-shaped controller selection must be unwrapped');
+    snapshot = { current: { sessionId: '' } }; for (const listener of listeners) listener();
+    assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), undefined);
+    snapshot = { current: 'C' }; for (const listener of listeners) listener();
+    assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), 'C', 'older string-shaped snapshots remain supported');
     snapshot = { current: undefined }; for (const listener of listeners) listener();
     assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), undefined);
     await provider.dispose(); await consumer.await();
     assert.equal(listeners.size, 0);
     assert.equal(window.__DSH_CONTEXT_KIT_SESSION__, undefined);
-    assert.deepEqual(notifications, ['A', 'B', undefined, undefined]);
+    assert.deepEqual(notifications, ['A', 'B', undefined, 'C', undefined, undefined]);
   } finally { await consumer.dispose(); await provider.dispose(); }
 });
 
