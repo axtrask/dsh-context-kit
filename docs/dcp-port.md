@@ -1,7 +1,7 @@
 # DCP port — status, seam, and remaining work
 
-Port of `opencode-dynamic-context-pruning` (upstream at
-`C:\Users\pro100noob\.dsh\tes\upstream\opencode-dcp`, AGPL-3.0) into this plugin.
+Port of `opencode-dynamic-context-pruning` (consulted in a separate upstream checkout,
+AGPL-3.0) into this plugin.
 Target: behavioural 1:1 with upstream — the same strategies, ranges, protection rules
 and nudges — plus a live, measurable reduction of what the model receives.
 
@@ -14,9 +14,10 @@ command with live settings; its verify/probe children are not safely isolated.
 
 ## 1. Where it stands
 
-- **Suite green: <!-- suite:count -->950 marked checks / 0 failures across 21 test + 8 verify + 3 probe files<!-- /suite:count -->**,
-  measured by `node scripts/run-suite.mjs`. `test-source-encoding.mjs` emits one check per owned
-  file, so the total tracks the file inventory: it is a generated number, never a hand-written one.
+- A historical all-green run reported **950 marked checks across 21 test, 8 verify, and
+  3 probe files**. That number predates later extraction and safety work and is not a current
+  release claim. Use `npm run test:publication` for deterministic publication acceptance;
+  `node scripts/run-suite.mjs` also runs environment-sensitive diagnostics.
 - **`run-suite.mjs` labels each file for what it is, and the label is computed rather than assumed.**
   Only `test-context-mode.mjs` and `test-search-guard.mjs` import `node:assert/strict`;
   `verify-status.mjs` fails through its own `process.exit` and `[FAIL]` lines;
@@ -25,9 +26,9 @@ command with live settings; its verify/probe children are not safely isolated.
   summary. Four auditors independently refuted the earlier claim that all five "assert through
   `node:assert/strict`" — it was wrong for three, and two of those could not fail at all. That is the
   defect class this section exists to catch: **evidence with no failure mode.**
-- Never quote a check count by hand: `run-suite.mjs --update` rewrites every
-  `<!-- suite:count -->` marker in `docs/`. Hand-written totals had drifted to three
-  different values (480 / 654 / 735) before the runner existed.
+- Never treat a historical aggregate check count as a release result. The publication
+  scripts report their own deterministic checks, while the extended suite includes live and
+  environment-sensitive diagnostics.
 - Commits: `59bc0e4`, `e62b981`, `37afefa`, `4a24be7`, `b81f631`, `4c32c20`, `73b092f`,
   `2424e7d`, `2c28bdb`, `6a6f6c7`. One commit per logical step, authored as
   `-c user.name=dcp -c user.email=dcp@local`.

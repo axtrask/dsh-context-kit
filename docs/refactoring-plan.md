@@ -192,9 +192,8 @@ unless requested. Do not restart or kill a running DSH process.
 
 ## Upstream And Separate Work
 
-The local upstream checkouts were consulted for the extraction boundaries:
-`C:/Users/pro100noob/.dsh/tes/upstream/opencode-dcp/lib/config.ts` and
-`C:/Users/pro100noob/.dsh/tes/upstream/context-mode/src/server.ts`.
+Separate upstream checkouts were consulted for the extraction boundaries:
+`opencode-dcp/lib/config.ts` and `context-mode/src/server.ts`.
 The browser editor is a local DSH integration, not an upstream web panel.
 Reuse this port's implementation; do not copy upstream source.
 

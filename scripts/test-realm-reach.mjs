@@ -34,8 +34,8 @@ const ok = async (label, fn) => {
 
 const candidates = [
   join(HERE, '..', 'node_modules', '@deepseek-ai', 'cordis', 'lib', 'index.js'),
-  'C:/Users/pro100noob/.dsh/plugins/node_modules/@deepseek-ai/cordis/lib/index.js'
-];
+  process.env.DSH_INSTALL && join(process.env.DSH_INSTALL, '@deepseek-ai', 'cordis', 'lib', 'index.js')
+].filter(Boolean);
 const found = candidates.find((candidate) => existsSync(candidate));
 if (found === undefined) {
   console.log('  [skip] cordis is not installed next to the kit');

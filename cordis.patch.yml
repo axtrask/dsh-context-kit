@@ -1,10 +1,11 @@
 - insert:
     - id: context-kit-bundle
       name: dsh-context-kit
-      disabled: true
+      disabled: false
       config:
         dcp:
           enabled: true
+          includeContextStatus: true
           manualMode: false
           automaticStrategies: true
           pruneNotification: detailed
@@ -69,3 +70,6 @@
         historyEditor:
           enabled: true
           requireIdle: true
+    - id: cdsh
+      name: ./packages/cdsh/lib/index.js
+      disabled: false

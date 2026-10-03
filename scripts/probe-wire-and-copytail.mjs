@@ -21,14 +21,6 @@
  * @module dsh-context-kit/scripts/probe-wire-and-copytail
  */
 
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const checkout = process.env.DSH_CHECKOUT ?? 'C:/Users/pro100noob/AppData/Local/npm-cache/_npx/1e7f6d9597241db0';
-const dsh = join(checkout, 'node_modules/@deepseek-ai');
-
-void dirname(fileURLToPath(import.meta.url));
-
 const { Context } = await import('@deepseek-ai/cordis');
 const llm = await import('@deepseek-ai/dsh-llm');
 const { Session, SessionId, foldSurface } = await import('@deepseek-ai/dsh-session');

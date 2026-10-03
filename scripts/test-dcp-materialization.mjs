@@ -31,7 +31,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const kitRoot = join(here, '..');
-const dshModules = join(process.env.DSH_CHECKOUT ?? 'C:/Users/pro100noob/AppData/Local/npm-cache/_npx/1e7f6d9597241db0', 'node_modules/@deepseek-ai');
 
 const failures = [];
 /** @param name - check label. @param ok - result. @param detail - evidence. */
@@ -48,7 +47,6 @@ const dcp = await import(pathToFileURL(join(kitRoot, 'lib', 'dcp.js')).href);
 const blocks = await import(pathToFileURL(join(kitRoot, 'lib', 'dcp-blocks.js')).href);
 
 const { createUserMessage, createAssistantMessage, createToolResultMessage, ToolCallId } = llm;
-void dshModules;
 
 /* ------------------------------------------------------------------- mounting */
 

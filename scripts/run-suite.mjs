@@ -20,7 +20,8 @@ const groups = [
   // Fixture sessions write per-session state files; point them at a throwaway home so a
   // suite run never litters the live `~/.dsh/context-kit/dcp-state`.
   { kind: 'test', pattern: /^test-.*\.mjs$/, sandboxed: true },
-  // `verify-preset` and `verify-load` read the *installed* preset under `$DSH_HOME`.
+  // Some verification scripts inspect the selected live Harness environment, while
+  // `verify-load` itself stays checkout-only. Do not redirect these to fixture state.
   { kind: 'verify', pattern: /^verify-.*\.mjs$/, sandboxed: false },
   { kind: 'probe', pattern: /^probe-.*\.mjs$/, sandboxed: false },
 ];

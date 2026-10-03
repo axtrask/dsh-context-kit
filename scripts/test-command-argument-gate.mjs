@@ -45,8 +45,8 @@ const ok = (label, fn) => {
 /** Resolve one installed harness package, wherever this machine keeps it. */
 function harnessFile(relative) {
   const candidates = [
+    join(ROOT, 'node_modules'),
     process.env.DSH_INSTALL,
-    'C:\\Users\\pro100noob\\AppData\\Local\\npm-cache\\_npx\\1e7f6d9597241db0\\node_modules',
     join(process.env.APPDATA ?? '', 'npm', 'node_modules')
   ].filter((value) => typeof value === 'string' && value.length > 0);
   for (const base of candidates) {

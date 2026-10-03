@@ -1,7 +1,7 @@
 # Editing chat history in DSH — design and evidence
 
-<!-- suite:count -->950 marked checks / 0 failures across 21 test + 8 verify + 3 probe files<!-- /suite:count -->
-(`node scripts/run-suite.mjs`) — the editor must keep that number green.
+The editor's release contract is guarded by `npm run test:edit-history`, which covers
+core behavior, durable state, wire behavior, GUI behavior, and GUI load order.
 
 The requirement, in the user's words: edit the chat history **both ways** — the
 assistant's replies and the user's own messages — so that the edited text is what
@@ -31,9 +31,8 @@ Probes in this repository, runnable with `node`:
   summary. It is kept as a printed record of how the `llm/stream` seam was first measured. See
   `docs/dsh-core.md` §4b for the waterfall trap this whole class of file can hide.
 
-Five auditors ran against the installed harness with full context; their reports and
-runnable scripts are in `C:\Users\pro100noob\.dsh\tes\audit-work\a1..a5\`. What each
-one established or falsified:
+Five historical audits ran against the installed Harness with full context. Their
+portable conclusions and maintained regression probes are recorded below:
 
 | Auditor | Result |
 |---|---|
@@ -151,13 +150,11 @@ and silent drift is a defect shape this project has already paid for three times
 
 Two ways to make the first branch answer `true`:
 
-- **In-place patch** of the installed bundle — `audit-work/a5/patch-dsh-session.mjs`
-  (`--check` now reports `GUARD PRESENT (edit blocked)` in all four live copies; `--apply`
-  writes `.a5-bak` backups). Fast, and silently reverted by any reinstall.
-- **Rebuild from the public source** (tag `dsh-v0.1.5-rc.2`, one edit in
-  `packages/core/session/src/surface.ts:274-275`) and override the row through
-  `~\.dsh\profiles\web\cordis.patch.yml`. Survives an install change; see
-  `docs/environment.md`. Recorded as the honest route once the editor itself works.
+- **Historical in-place patch** of an installed bundle. This was fast but was silently
+  reverted by reinstalling DSH and is not part of the published package.
+- **Rebuild from the matching public DSH source** with the required session-core change.
+  This is the maintainable upstream route; Context Kit itself never edits the installed
+  Harness files or the active profile.
 
 Both branches are proven runnable today (`scripts/probe-edit-feasibility.mjs`,
 `scripts/probe-wire-and-copytail.mjs`), so the hybrid is a wiring job, not a research job.

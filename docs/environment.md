@@ -1,112 +1,70 @@
-# Environment: paths, wiring, and the operational layer
+# Environment and operational boundaries
 
-Everything here is specific to this machine and this install. Paths change when the
-harness is reinstalled, so every one of them is stated with the way to rediscover it.
+Context Kit is installed from an ordinary local or Git checkout. The checkout must not
+assume a user name, a DSH cache hash, a profile directory, or a platform-specific path.
 
-## Paths
+## Runtime discovery
 
-| what | where |
+DSH exposes these values to processes started by a profile:
+
+| Variable | Purpose |
 |---|---|
-| Harness install (npx cache, hash-named) | `C:\Users\pro100noob\AppData\Local\npm-cache\_npx\1e7f6d9597241db0\` |
-| Harness packages | `...\_npx\1e7f6d9597241db0\node_modules\@deepseek-ai\` (230 packages, 714 `.js`, ~22 MB) |
-| This plugin | `C:\Users\pro100noob\.dsh\plugins\dsh-context-kit` |
-| Plugin workspace / scratch | `C:\Users\pro100noob\.dsh\tes` |
-| Upstream DCP (AGPL) | `C:\Users\pro100noob\.dsh\tes\upstream\opencode-dcp` |
-| Upstream context-mode | `C:\Users\pro100noob\.dsh\tes\upstream\context-mode` |
-| Audit artifacts (a1..a5) | `C:\Users\pro100noob\.dsh\tes\audit-work\<id>\` |
-| DCP state (per session) | `~\.dsh\context-kit\dcp-state\<sessionId>.json` |
-| Session logs | `$DSH_HOME\sessions\<projectKey>\<encodedId>\session.v3.jsonl.zstd` |
-| Projection cache | `$DSH_HOME\storages\session_projcache\sessions\<id>.json` |
-| Profile patch layer | `~\.dsh\profiles\web\cordis.patch.yml` |
-| `$DSH_HOME` | `C:\Users\pro100noob\.dsh` |
+| `DSH_HOME` | Harness state root |
+| `DSH_PROFILE` | Active profile name |
+| `DSH_PROFILE_DIR` | Active profile directory |
 
-Public source of the harness (for a rebuild instead of a patch): repository
-`deepseek-ai/deepseek-harness`, tag `dsh-v0.1.5-rc.2`, commit
-`fb2c4b9e698e30edb738bca4cf0618587db7d203` — 10,167 files, 3,660 `.ts`. The installed
-launcher is `rc.1` while all libraries are `rc.2`.
+They are runtime inputs, not installation targets. Repository code and scripts must not
+write a profile manifest or patch directly. A test that inspects unpacked Harness files
+may accept `DSH_INSTALL` as the `node_modules` root, but normal package loading uses the
+Node resolver and the dependencies declared in `package.json`.
 
-## How the plugin is wired into the running server
+Session and Context Mode state belong beneath `DSH_HOME`; source code, generated bundles,
+and dependency links do not.
 
-The kit resolves its `@deepseek-ai/*` imports through **one junction**:
+## Supported installation
 
-```
-~\.dsh\plugins\node_modules  ->  <harness install>\node_modules
+Use `plugin_manager install_bundle` with the absolute repository root:
+
+```json
+{
+  "action": "install_bundle",
+  "target": "<absolute-path-to-dsh-context-kit>"
+}
 ```
 
-It sits at the plugins root rather than inside the kit on purpose: every plugin dropped
-into that folder shares it, and Node's upward lookup finds it from
-`plugins\dsh-context-kit\lib\*.js`. If it goes stale after a harness upgrade, repair it
-with:
+The Plugin Manager installs ordinary dependencies, resolves the exact optional Harness
+peers from the DSH installation, applies `cordis.patch.yml`, and owns subsequent updates.
+Do not copy the package under `DSH_HOME`, edit profile files, create a `node_modules`
+junction, or apply a separate preset.
 
-```powershell
-node "$env:USERPROFILE\.dsh\plugins\dsh-context-kit\scripts\link-modules.mjs"
+The bundle patch inserts one aggregate Context Kit row and one relative nested CDSH row.
+Both rows resolve from the installed bundle, so the composition remains portable across
+DSH and Node.js installation locations.
+
+## Development checks
+
+Run the publication gates from the repository root:
+
+```sh
+npm run test:publication
+node scripts/verify-load.mjs
 ```
 
-That script discovers the harness tree instead of hardcoding the path.
+The publication gate checks the manifest, Loader topology, packed inventory, and Edit
+History regressions. `verify-load.mjs` imports the canonical aggregate package, validates
+its schemas, exercises the in-memory knowledge base, and runs the supported sandbox
+languages in a temporary directory. Neither command installs a bundle or changes a DSH
+profile.
 
-The kit also ships **its own agent presets** in a directory it owns
-(`~\.dsh\plugins\presets`) and registers that directory as a `user` root, so the roster
-stays with the code that defines it.
+Some historical probes inspect Harness implementation details. They resolve installed
+packages through Node or require an explicit `DSH_INSTALL`; they must fail clearly rather
+than fall back to a developer's machine path.
 
-`~\.dsh\profiles\web\cordis.patch.yml` is a real, working user overlay — it already
-overrides a shipped row of the running harness and is applied after every bundle layer.
-It is a top-level YAML array of loader patch entries (id-targeted config overrides,
-disables, insert lists; `!!js` expressions allowed). Current content:
+## Operational rules
 
-```yaml
-- id: agent-presets
-  config:
-    default: context-kit
-    roots:
-      - path: ~/.dsh/plugins/presets
-        trust: user
-```
-
-Two warnings recorded in the file itself and worth keeping: a patch **replaces the whole
-`config`** of the targeted row, so every key that row owns must be restated; and a preset
-can also be picked per session in Settings → General.
-
-Verification: `scripts/verify-activation.mjs` passes 7/7 in a real cordis root.
-
-## Harness facts that shape everything
-
-- The install is a **published bundle**, not a source checkout: `lib/*.js` are built
-  artifacts and the same source-level guard can exist in several copies (server bundle,
-  subpath bundle, two browser bundles). Any core patch must handle every live copy —
-  see `docs/dsh-core.md` §3.4.
-- The install directory name is a **hash of the npx invocation**. A reinstall lands in a
-  new directory holding pristine packages, so any in-place patch is silently reverted.
-  Detect it with `patch-dsh-session.mjs --check`, which fails loudly when its anchor moved.
-- `dsh web` serves the Web GUI at `http://127.0.0.1:3080` and injects
-  `window.__DSH_BOOT__`; `apps/web` is a shell, not a standalone app.
-- Client-plugin changes hot-reload only while `pnpm run dev:web` is running from the
-  checkout; anything else needs a rebuild plus a page refresh.
-
-## Operational rules for this workspace
-
-- **The user restarts the server.** Never restart it or kill processes on their behalf.
-- File policy is `danger-full-access` and approval prompts are **disabled**, so never
-  request sandbox escalation — a denial is final.
-- Replies are in **Russian**; code, commits and these documents are in English.
-- One git commit per logical step, in the plugin repository, authored with
-  `-c user.name=dcp -c user.email=dcp@local`.
-- Keep the suite green (<!-- suite:count -->950 marked checks / 0 failures across 21 test + 8 verify + 3 probe files<!-- /suite:count -->,
-  measured by `node scripts/run-suite.mjs`, which is also the only supported way to quote a
-  number: every count in these documents is generated by `run-suite.mjs --update`). A change
-  that cannot be proven by a runnable check is not done. The runner points the *test* files at
-  a throwaway `DSH_HOME` (`.suite-state/`) so fixture sessions stop writing into the live
-  `~/.dsh/context-kit/dcp-state/`; the verify and probe files keep the real home because
-  `verify-preset` and `verify-load` read the installed preset.
-
-## Tooling gotchas that cost real time
-
-- `ctx_batch_execute` strips `$` and `^` from commands.
-- Never write Cyrillic sources through PowerShell (the mojibake reaches the file). Use the
-  file tools; `scripts/test-source-encoding.mjs` (68 checks) guards against regressions.
-- PowerShell here is 5.1: no `&&`, and `2>&1 | Select-Object` turns Node's stderr into a
-  noisy `NativeCommandError` wrapper — read through it rather than trusting the exit code.
-- `node --input-type=module -e "..."` through PowerShell mangles backslashes and escapes;
-  write a `.mjs` file in the plugin directory instead.
-- `write` sometimes reports "file no longer exists" for a genuinely new path — retry.
-- `Session.append` rejects `undefined` inside event payloads (it is not JSON for DSH),
-  which is how `createToolResultMessage` without an explicit `isError` fails.
+- Never restart or kill a running DSH process. The user controls restarts.
+- Use `plugin_manager` for every profile bundle change.
+- Treat the `application` and `warnings` fields returned by Plugin Manager as the source
+  of truth for live application versus restart requirements.
+- Keep code, comments, identifiers, and English documentation in English.
+- Preserve executable regression guards for every behavior-affecting fix.

@@ -1,9 +1,13 @@
 {
   "name": "dsh-context-kit",
-  "version": "0.1.5",
+  "version": "0.1.11",
   "private": true,
   "type": "module",
   "description": "Native DeepSeek Harness integrations for DCP, Context Mode, and History Editor.",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./dcp": "./lib/dcp.js",
@@ -30,19 +34,58 @@
     },
     "client": {
       "platform": "web",
-      "inject": ["@deepseek-ai/dsh-api-session-controller", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-settings-plugins"]
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-plugins"
+      ]
     }
+  },
+  "scripts": {
+    "test:metadata": "node scripts/test-bundle-metadata.mjs",
+    "test:edit-history": "node scripts/test-edit.mjs && node scripts/test-edit-durable.mjs && node scripts/test-edit-wire.mjs && node scripts/test-edit-gui.mjs && node scripts/test-edit-gui-load-order.mjs",
+    "test:publication": "npm run test:metadata && npm run test:edit-history"
   },
   "files": [
     "lib",
     "locale/*.json",
     "locale/**/*.json",
-    "runtime",
-    "runtime-2",
-    "runtime-3",
-    "runtime-4",
-    "runtime-5",
-    "runtime-6",
-    "cordis.patch.yml"
-  ]
+    "cordis.patch.yml",
+    "packages/cdsh"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-connection": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-compaction-basic": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-util-values": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "3.18.4"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-connection": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-compaction-basic": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-util-values": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "undici": "8.11.2"
+  }
 }

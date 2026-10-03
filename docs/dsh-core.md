@@ -5,7 +5,7 @@ claim names the file and line that enforces it and the artifact that demonstrate
 it. When a claim was overturned later, the overturning evidence is recorded too —
 three of our early conclusions did not survive contact with a real session.
 
-`F = C:\Users\pro100noob\AppData\Local\npm-cache\_npx\1e7f6d9597241db0\node_modules\@deepseek-ai\`
+`F = <dsh-install>/node_modules/@deepseek-ai/`
 
 ## 1. The shape of a session
 
@@ -214,10 +214,10 @@ Implementation requirements discovered after the fact:
 - `dsh-session\invariant.js:56-58` requires an open step for `assistant/message`, so an
   out-of-turn edit trips it.
 
-Upgrade risk: the install lives in an npx cache directory named by hash
-(`_npx\1e7f6d9597241db0`). A new install is a **new directory with a pristine package**,
-so the patch must be re-applied. `patch-dsh-session.mjs --check` (in `audit-work/a5`)
-tests its own applicability and exits non-zero when the anchor is missing.
+Historical upgrade risk: an npx installation may live in a cache directory named by
+hash. A new install creates a **new directory with a pristine package**, so any historical
+in-place experiment had to be re-applied. The published Context Kit bundle does not patch
+that installation directory.
 
 ## 4. Session plumbing worth remembering
 
@@ -337,9 +337,9 @@ attempt to find this from the persisted session log went in circles.
 - **Verify that `disabled: true` actually applied.** Disabling a preset row at profile level left
   the row in the composition (another row overrode it), and "the disable did not help" was a wrong
   conclusion drawn from a correct observation. Check `--dump-config` and confirm the row is gone.
-- **Do not hand-edit `~/.dsh/.agent-presets/context-kit/agent.cordis.yml`.** It is a generated
-  snapshot of the shipped `standard` preset; `scripts/sync-preset.mjs` regenerates it and would wipe
-  the edit. Change the generator.
+- **Do not revive the legacy `~/.dsh/.agent-presets/context-kit` copy.** The canonical bundle no
+  longer ships or regenerates that preset. Its supported composition comes only from the bundle
+  patch installed by Plugin Manager.
 - **Removing the `dcp` row from the preset is not a workaround**: the preset then fails to mount —
   `agent-preset/invalid: preset "context-kit" failed to mount: 1 row(s) did not activate:
   command-compact (...): waiting for compaction`, because `command-compact` waits on the

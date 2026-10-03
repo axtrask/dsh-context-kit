@@ -167,7 +167,7 @@ That script was also injected only into the dedicated live test tab at
 position (top 426px), dimensions (260x68px), font and padding. A dirty Cancel
 restored the prior effective text, removed editing attributes and issued zero
 commit requests. Screenshot:
-`C:/Users/pro100noob/AppData/Local/Temp/opencode/ctxkit-live-thinking-in-place-390.png`.
+`<temporary-directory>/ctxkit-live-thinking-in-place-390.png`.
 Save/Restore in this pass used isolated browser fixtures, not live-session writes.
 
 ## Unified Native Editing
@@ -347,7 +347,7 @@ UI served to the user at that stage.
   This is not merely a stale browser response. The host remains unchanged.
 
 Screenshot of the unmodified served page:
-`C:/Users/pro100noob/AppData/Local/Temp/opencode/ctxkit-bottom-server-before.png`.
+`<temporary-directory>/ctxkit-bottom-server-before.png`.
 Editors were opened and cancelled without changing or saving text. No live
 Save/Restore was performed. The earlier statement that all actions were already
 below their blocks was not true of the running UI. The following delivery fix
@@ -388,7 +388,7 @@ init script or panel injection. In the dedicated live test conversation:
   restored and no draft remained.
 
 Actual served-page screenshots, not fixture or injected-script screenshots:
-`C:/Users/pro100noob/AppData/Local/Temp/opencode/ctxkit-bottom-served-fixed-1280.png`
+`<temporary-directory>/ctxkit-bottom-served-fixed-1280.png`
 and `ctxkit-bottom-served-fixed-390.png`.
 
 This hot update fixes control placement only. It does not replace the older
@@ -425,7 +425,7 @@ actions used the exact native artwork and had no direct visible text. Native
 code Copy displayed an icon, retained its original accessible label, and had a Copy tooltip.
 Desktop controls measured 28x28; touch controls measured 44x44. This pass made no
 live clipboard writes or Save/Restore requests. Screenshots:
-`C:/Users/pro100noob/AppData/Local/Temp/opencode/ctxkit-copy-icons-1280.png`
+`<temporary-directory>/ctxkit-copy-icons-1280.png`
 and `ctxkit-copy-icons-390.png`.
 
 ## Activation And Limits

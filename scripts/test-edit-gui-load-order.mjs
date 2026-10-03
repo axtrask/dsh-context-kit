@@ -54,8 +54,8 @@ const ok = (label, fn) => {
 async function loadCordis() {
   const candidates = [
     join(HERE, '..', 'node_modules', '@deepseek-ai', 'cordis', 'lib', 'index.js'),
-    'C:/Users/pro100noob/.dsh/plugins/node_modules/@deepseek-ai/cordis/lib/index.js'
-  ];
+    process.env.DSH_INSTALL && join(process.env.DSH_INSTALL, '@deepseek-ai', 'cordis', 'lib', 'index.js')
+  ].filter(Boolean);
   for (const candidate of candidates) {
     if (existsSync(candidate)) {
       const module = await import(pathToFileURL(candidate).href);

@@ -1,6 +1,4 @@
-import { pathToFileURL } from 'node:url';
-const base = 'C:/Users/pro100noob/AppData/Local/npm-cache/_npx/1e7f6d9597241db0/node_modules/@deepseek-ai';
-const { Context } = await import(pathToFileURL(base + '/cordis/lib/index.js').href);
+const { Context } = await import('@deepseek-ai/cordis');
 
 /* 1. Does cordis `waterfall` honour arguments passed to `next(...)`? */
 {

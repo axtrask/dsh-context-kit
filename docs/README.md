@@ -1,9 +1,9 @@
 # Context kit — working notes
 
 This directory holds the accumulated knowledge behind this plugin: what the DSH core
-allows and forbids, how the DCP port is built, what the history-editor work has
-established, and how this machine is wired. It exists so that a fresh context — after a
-compaction, or a new session — can continue without re-deriving anything.
+allows and forbids, how the DCP port is built, what the history-editor work established,
+and how the portable bundle is composed. It exists so maintainers can continue without
+re-deriving the design evidence.
 
 ## Read in this order
 
@@ -14,28 +14,26 @@ compaction, or a new session — can continue without re-deriving anything.
 | [`docs/edit-feature.md`](edit-feature.md) | Editing chat history: the three mechanisms, the five audits, the agreed hybrid plan, and the implementation requirements |
 | [`docs/environment.md`](environment.md) | Paths, plugin wiring, the profile patch layer, operational rules, and tooling traps |
 
-## Current state, in five lines
+## Current state
 
-- **DCP port works and is green:** <!-- suite:count -->950 marked checks / 0 failures across 21 test + 8 verify + 3 probe files<!-- /suite:count --> (`node scripts/run-suite.mjs`), the automatic
-  pass is proven end to end on a real `SessionStore`; a shadowed span measures
-  2038 → 46 tokens, so the saving is real rather than a manifest claim.
-- **Twelve parity defects are closed since the first audit**, each with the commit and the
-  cost recorded in `dcp-port.md` §6 — the age unit, the dedup signature, the compress limit
-  defaults, the output-prune exemption, the nudge delivery, an invented config key, plus
-  `recompress`, tool-name globs, `resetOnCompaction`, per-session nudge state, `sweep N` and
-  a `decompress` that actually restored anything.
-- **What remains open is listed in `dcp-port.md` §7** and is small: `nudgeForce` (inert by
-  construction, explained in place), and `context-mode`, the untouched second plugin.
-- **A history editor is researched, designed and agreed, but not built.** Agreed order:
-  finish DCP, then build the editor as a hybrid (durable when the core ban is lifted,
-  wire-level otherwise). DCP is now finished by that definition.
+- **DCP is implemented and protected by focused regression tests.** The automatic pass is
+  proven end to end on a real `SessionStore`; a shadowed span measures 2038 → 46 tokens.
+- **Context Mode is integrated into the aggregate plugin** and shares the package-level
+  configuration surface with DCP and History Editor.
+- **History Editor is implemented.** Its durable and wire-level behavior, GUI contract, and
+  load order are guarded by `npm run test:edit-history`.
+- **Release validation is intentionally split.** Run `npm run test:publication` for the
+  deterministic publication gates. `node scripts/run-suite.mjs` also contains historical,
+  live-profile, and environment-sensitive probes and is not the release acceptance gate.
 
 ## Runnable evidence
 
 ```powershell
-# everything at once: 15 test files, 8 verify scripts, 3 probes
-node scripts/run-suite.mjs                # add --update to refresh the suite:count markers
-node scripts/run-suite.mjs --update
+# deterministic publication gates
+npm run test:publication
+
+# extended historical/live diagnostics (environment-sensitive)
+node scripts/run-suite.mjs
 
 # the port's own suite, file by file
 node scripts/test-dcp-compress.mjs        # 109 checks
@@ -70,18 +68,17 @@ that last class and was fixed by making it own its exit code — four auditors h
 and one of them was right that a probe which cannot fail is not evidence.
 
 A suite run points the **test** files at a throwaway `DSH_HOME` (`.suite-state/`,
-git-ignored) so fixture sessions stop writing state files into the live
-`~/.dsh/context-kit/dcp-state/`; the verify and probe files keep the real home because
-`verify-preset` and `verify-load` read the installed preset.
+git-ignored) so fixture sessions stop writing state files into the live Context Kit state
+directory. Some verify and probe files intentionally inspect the selected Harness profile;
+`verify-load.mjs` is checkout-only and uses temporary scratch state.
 
 ## Rules of engagement
 
-- Consult the upstream sources before every design decision:
-  `~\.dsh\tes\upstream\opencode-dcp` for DCP, and the public harness source (tag
-  `dsh-v0.1.5-rc.2`) when core behaviour is in question.
-- One git commit per logical step; keep the suite green; verify on the live server rather
-  than claiming success. Unproven means unfinished.
-- Never restart the user's server. File policy is `danger-full-access` with approval
-  prompts disabled, so sandbox escalation must never be requested.
+- Consult the upstream sources before every design decision: a separate local checkout of
+  `opencode-dcp` for DCP, and the matching public Harness source when core behaviour is in
+  question.
+- One git commit per logical step; keep deterministic publication gates green and classify
+  environment-sensitive diagnostics explicitly. Unproven means unfinished.
+- Never restart the user's server while validating a development checkout.
 - Re-read `docs/dsh-core.md` before assuming a core limit: three of our early conclusions
   were wrong, and retracting them cost five audits.
