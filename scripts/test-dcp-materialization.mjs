@@ -199,11 +199,6 @@ const refusedSummaries = [
     f.entry.startSeq = f.head.seq;
     f.entry.shadowedSeqs.unshift(f.head.seq);
   }, { replaceHead: true }],
-  ['invisible system inside selection', () => {}, { middleSystem: true }],
-  ['non-head system selected alone', (f) => {
-    const seq = f.session.surface.nodes[2];
-    Object.assign(f.entry, { startSeq: seq, endSeq: seq, shadowedSeqs: [seq] });
-  }, { middleSystem: true }],
   ['stale start', (f) => {
     f.session.append('user/message', f.entry.summaryMessage, {
       surfaceOp: { op: 'replace', startSeq: f.first.seq, endSeq: f.first.seq }, sourceEventSeqs: [f.first.seq]
@@ -272,6 +267,7 @@ console.log('\n--- valid summaries after a system head preserve order, price, an
 for (const [name, options, replaceFirst, tokens] of [
   ['ordinary range', {}, false, 12],
   ['newer system head', { replaceHead: true }, false, 0],
+  ['historical system update', { middleSystem: true }, false, 12],
   ['nonascending replacement ids', {}, true, 12.5]
 ]) {
   const { session, entry, head, first, tail } = summaryFixture(options);

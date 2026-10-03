@@ -2035,9 +2035,12 @@ export class DcpCompactionEngine extends BasicCompactionEngine {
     const startIdx = nodes.findIndex((seq) => Number(seq) === Number(start));
     const endIdx = nodes.findIndex((seq) => Number(seq) === Number(end));
     if (startIdx === -1 || endIdx === -1 || endIdx < startIdx) return undefined;
-    for (let index = startIdx; index <= endIdx; index += 1) {
-      if (session.eventAt(nodes[index])?.type === 'system/message') return undefined;
-    }
+
+    // Match the core compaction invariant: only a system message at surface node
+    // zero is the protected prompt head. Later system messages are historical
+    // prompt updates and ordinary compactable history. Rejecting any system node
+    // made old block ranges impossible to absorb after a model/prompt change.
+    if (startIdx === 0 && session.eventAt(nodes[0])?.type === 'system/message') return undefined;
 
     // Balance immediately BEFORE each node, and immediately AFTER it.
     //

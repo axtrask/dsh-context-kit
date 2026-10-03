@@ -848,10 +848,11 @@ export function prepareSummaryMaterialization(session, entry) {
   }
   for (let index = startIdx; index <= endIdx; index += 1) {
     const event = session.eventAt(nodes[index]);
-    // DCP excludes ALL system messages, including empty nodes and a rewritten
-    // head whose seq is newer than the rest of the selected surface.
-    if (event === undefined || event.type === 'system/message') {
-      throw new Error(`summary cannot replace missing or system/message node ${nodes[index]}`);
+    // The core protects only a system message at surface node zero. Later
+    // system messages are historical prompt updates and may be shadowed like
+    // the rest of the selected history.
+    if (event === undefined || (index === 0 && event.type === 'system/message')) {
+      throw new Error(`summary cannot replace missing or protected system head node ${nodes[index]}`);
     }
     // This list also prices compaction/prune, so extra or reordered provenance
     // is not a valid claim even if it would be legal on a replacement alone.

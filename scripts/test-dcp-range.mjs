@@ -141,7 +141,8 @@ console.log('\n--- system nodes and stale addresses ---');
   check('a removed start cannot snap to unrelated surviving messages', engine.balancedRange(stale, 2, 7) === undefined);
   check('a removed end cannot snap to an earlier surviving message', engine.balancedRange(stale, 1, 4) === undefined);
   const interior = fakeSession([user, textOnly('a'), system, textOnly('b')], [0, 1, 2, 3]);
-  check('an interior system message cannot be shadowed', engine.balancedRange(interior, 0, 3) === undefined);
+  const interiorRange = engine.balancedRange(interior, 0, 3);
+  check('an interior historical system message can be shadowed', interiorRange !== undefined && interiorRange.startIdx === 0 && interiorRange.endIdx === 3, JSON.stringify(interiorRange));
   check('a non-system first surface node remains compressible', engine.balancedRange(interior, 0, 1) !== undefined);
 }
 
@@ -213,6 +214,22 @@ console.log('\n--- replacement ids follow surface order, not numeric order ---')
   const onlyBlocks = fakeSession(both.surface.nodes.map((seq) => both.eventAt(seq)), [0, 1, 2, 4]);
   const blockRange = engine.balancedRange(onlyBlocks, 2, 4);
   check('a range containing only blocks is accepted', blockRange !== undefined && blockRange.startIdx === 2 && blockRange.endIdx === 3 && JSON.stringify(blockRange.boundaryBlockIds) === '[7,8]', JSON.stringify(blockRange));
+
+  // A restarted long-lived session can have an obsolete in-history prompt update
+  // between the old blocks selected for absorption. Only surface node 0 is the
+  // protected system head; later system messages are ordinary compactable history.
+  const restarted = fakeSession([
+    system,
+    user,
+    checkpointBlock(101, 'old one'),
+    checkpointBlock(102, 'old two'),
+    system,
+    checkpointBlock(103, 'old three'),
+    checkpointBlock(104, 'old four'),
+    checkpointBlock(105, 'old five')
+  ], [0, 1, 2, 3, 4, 5, 6, 7]);
+  const restartedRange = engine.balancedRange(restarted, 2, 7);
+  check('b101..b105 may cross an obsolete system update', restartedRange !== undefined && restartedRange.startIdx === 2 && restartedRange.endIdx === 7 && JSON.stringify([...restartedRange.innerBlockIds, ...restartedRange.boundaryBlockIds].sort((a, b) => a - b)) === '[101,102,103,104,105]', JSON.stringify(restartedRange));
 }
 
 console.log(`\n${failures.length === 0 ? 'all DCP range tests passed' : `${failures.length} failure(s)`}`);

@@ -517,6 +517,23 @@ try {
   check('block-only recompression absorbs both predecessors', adjacentText.includes('ADJACENT-MERGED') && !adjacentText.includes('ADJACENT-FIRST') && !adjacentText.includes('ADJACENT-SECOND'), adjacentText);
   check('block-only recompression records both predecessor ids', JSON.stringify(adjacentValue.blocks[0].childBlockIds) === '["1","2"]' && JSON.stringify(adjacentValue.blocks[0].absorbedBlockIds) === '["1","2"]', JSON.stringify(adjacentValue.blocks[0]));
 
+  const historicalSystem = fixture({ tail: false });
+  await compressRange(standard, historicalSystem, historicalSystem.user, historicalSystem.user, 'HISTORICAL-FIRST');
+  const historicalAssistant = ref(standard.engine, historicalSystem.session, historicalSystem.assistant);
+  await compressRange(standard, historicalSystem, historicalAssistant, historicalAssistant, 'HISTORICAL-SECOND');
+  historicalSystem.session.append('system/message', {
+    turn: 2,
+    step: 0,
+    message: llm.createSystemMessage('OBSOLETE-SYSTEM-UPDATE', 'fixture-update')
+  }, { surfaceOp: 'append' });
+  const historicalTail = appendUser(historicalSystem.session, 'HISTORICAL-TAIL');
+  await compressRange(standard, historicalSystem, historicalTail, historicalTail, 'HISTORICAL-THIRD');
+  const historicalValue = await compressRange(standard, historicalSystem, 'b1', 'b3', 'HISTORICAL-MERGED', 'Merged across prompt update');
+  const historicalText = modelText(historicalSystem.session);
+  check('old block recompression may cross a historical system update', historicalValue.compressed === true && historicalValue.absorbedBlocks === 3, JSON.stringify(historicalValue));
+  check('historical system recompression absorbs all predecessors and the obsolete update', historicalText.includes('HISTORICAL-MERGED') && !historicalText.includes('HISTORICAL-FIRST') && !historicalText.includes('HISTORICAL-SECOND') && !historicalText.includes('HISTORICAL-THIRD') && !historicalText.includes('OBSOLETE-SYSTEM-UPDATE'), historicalText);
+  check('the protected system head survives historical system recompression', historicalText.includes('SYSTEM-ONLY'), historicalText);
+
   console.log('\n--- strict canonical placeholder semantics ---');
   const lateRow = fixture();
   const lateUser = ref(standard.engine, lateRow.session, lateRow.user);
