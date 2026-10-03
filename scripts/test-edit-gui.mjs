@@ -868,8 +868,11 @@ ok('grouped seats use their canonical reply key and deleted turns include auxili
   assert.equal(deletedEntryFor(hidden, hiddenTurns, row({ 'data-chat-turn': '9' })), undefined,
     'a neighboring turn was hidden');
   assert.equal(deletedEntryFor([{ type: 'user/message', originId: 'u1' }], new Set(),
+    row({ 'data-chat-flow-kind': 'user', 'data-chat-flow-key': '13:input-messageu1' })), undefined,
+  'a partially hidden row without Host deletion metadata must stay visible');
+  assert.equal(deletedEntryFor([{ type: 'user/message', originId: 'u1', deletedTurn: true }], new Set(),
     row({ 'data-chat-flow-kind': 'user', 'data-chat-flow-key': '13:input-messageu1' }))?.originId, 'u1',
-  'a deleted user-only turn must still match by origin id');
+  'a deleted user-only turn must still match by origin id when the Host marks it deleted');
 });
 
 ok('deleted-row markers are reversible without touching native visibility or DOM ownership', () => {
@@ -1846,7 +1849,7 @@ ok('route projection preserves legacy audits and reports refused edits honestly'
   assert.equal(refused.targets[0].editStatus, 'refused');
 });
 
-ok('registered durable commits expose verified origin separately after repeat edits and replay', async () => {
+ok('registered durable commits retain direct-human deletion provenance after replay', async () => {
   const panel = await mountedPanel([blockText('ANSWER')], { id: 'edit-gui-origin' });
   let user = panel.user;
   for (const text of ['B', 'QUESTION']) {
@@ -1867,8 +1870,19 @@ ok('registered durable commits expose verified origin separately after repeat ed
     assert.equal(user.targets[0].changed, user.changed);
     assert.equal(user.targets[0].label, 'Message');
     assert.equal(user.editStatus, 'applied');
+    assert.equal(user.directUser, true);
     assert.deepEqual(listed.transcript.find((entry) => entry.seq === user.seq), user);
   }
+  const removed = (await panel.answer(EDIT_METHODS.deleteTurn, {
+    sessionId: panel.sessionId, seq: user.seq, id: user.id, expected: user.text
+  })).body.result.value;
+  assert.equal(removed.ok, true, String(removed.reason));
+  panel.reload();
+  const listed = (await panel.answer(EDIT_METHODS.list, { sessionId: panel.sessionId })).body.result.value;
+  assert.deepEqual(listed.hidden.map((entry) => entry.deletedTurn), [true, true],
+    'a deleted edited turn lost Host deletion metadata after replay');
+  assert.deepEqual(listed.hidden.map((entry) => entry.directUser), [true, false],
+    'a durable replacement stopped being a direct-human turn boundary after replay');
 });
 
 ok('disabled editor lists raw wire text without undoing durable edits or saving', async () => {

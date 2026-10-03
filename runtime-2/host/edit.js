@@ -644,7 +644,8 @@ function validateDeletionSlice(messages, edit, start) {
 
 const DIRECT_HUMAN_SOURCE_KINDS = new Set(['user', 'plugin:edit', 'plugin:context-kit-editor']);
 
-function directHumanSource(kind) {
+/** Whether a user-role message starts a direct human turn, including verified editor replacements. */
+export function directHumanSource(kind) {
   return DIRECT_HUMAN_SOURCE_KINDS.has(kind);
 }
 

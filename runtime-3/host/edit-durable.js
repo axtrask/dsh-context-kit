@@ -25,6 +25,7 @@ import {
   messageAnchor,
   canonicalTexts,
   cursorBlockIndex,
+  directHumanSource,
   editableTextOf,
   planWireRewrite,
   signedReasoningRefusal
@@ -122,7 +123,7 @@ export function editableIndex(session) {
       text: textOfMessage(message),
       blocks: canonicalTexts(message).length,
       sourceKind: message.source?.kind,
-      directUser: event.type === USER_EVENT && message.source?.kind === 'user',
+      directUser: event.type === USER_EVENT && directHumanSource(message.source?.kind),
       message
     };
     entries.push(entry);
@@ -192,7 +193,7 @@ export function effectiveEditableIndex(session, edits = []) {
       originSeq,
       originId: origin.id,
       originSourceKind: origin.source?.kind,
-      directUser: entry.type === USER_EVENT && origin.source?.kind === 'user',
+      directUser: entry.type === USER_EVENT && directHumanSource(origin.source?.kind),
       ...metadata()
     };
     return { ...effective, targets: blockTargets(effective).map((target) => ({ ...target, ...metadata(target.at) })) };

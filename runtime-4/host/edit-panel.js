@@ -959,8 +959,11 @@ if (HOST && HOST.shadowRoot === null) {
   };
   const deletedTurnsOf = (entries) => new Set(entries.filter((entry) => entry?.deletedTurn === true)
     .map((entry) => entry.turn).filter(Number.isInteger));
-  const deletedEntryFor = (entries, turns, node) => entryFor(entries, targetOf(node))
-    || (turns.has(turnOf(node)) ? { turn: turnOf(node) } : undefined);
+  const deletedEntryFor = (entries, turns, node) => {
+    const exact = entryFor(entries, targetOf(node));
+    if (exact?.deletedTurn === true) return exact;
+    return turns.has(turnOf(node)) ? { turn: turnOf(node) } : undefined;
+  };
 
   // Signed thinking is excluded. Missing targets retain the shipped implicit target.
   const pinTargets = (entry) => {
