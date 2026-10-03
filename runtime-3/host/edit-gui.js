@@ -179,11 +179,16 @@ export function panelEntry(entry) {
 const editorConfig = runtime => runtime?.editorConfig ?? runtime?.dcpConfig?.editor;
 
 /** Host-authoritative mutation gate. Missing agent services are valid on a standalone Host editor. */
-function idleRefusal(engine) {
+function idleRefusal(ctx, engine, sessionId) {
   if (editorConfig(engine)?.requireIdle !== true) return undefined;
-  let status;
-  try { status = engine?.ctx?.get?.('agent')?.status; } catch { status = undefined; }
-  return status !== undefined && status !== 'idle'
+  let agent;
+  try { agent = ctx.get?.('agents')?.get?.(sessionId); } catch { agent = undefined; }
+  // Legacy preset compositions can expose the scoped agent directly. The Host
+  // registry is primary because an engine context is not itself an agent scope.
+  if (agent === undefined) {
+    try { agent = engine?.ctx?.get?.('agent'); } catch { agent = undefined; }
+  }
+  return agent?.status !== undefined && agent.status !== 'idle'
     ? 'Generation is running. Stop generation before editing or deleting history.'
     : undefined;
 }
@@ -255,7 +260,7 @@ function commitValue(ctx, engine, payload) {
   if (config?.enabled !== true) {
     return { ok: false, reason: 'the history editor is disabled; enable History Editor in Settings > Plugins' };
   }
-  const busy = idleRefusal(engine);
+  const busy = idleRefusal(ctx, engine, payload?.sessionId);
   if (busy !== undefined) return { ok: false, reason: busy };
   const session = sessionById(ctx, payload?.sessionId);
   if (session === undefined) return { ok: false, reason: `no live session ${JSON.stringify(payload?.sessionId)}` };
@@ -347,7 +352,7 @@ function deleteTurnValue(ctx, engine, payload) {
   if (config?.enabled !== true) {
     return { ok: false, reason: 'the history editor is disabled; enable History Editor in Settings > Plugins' };
   }
-  const busy = idleRefusal(engine);
+  const busy = idleRefusal(ctx, engine, payload?.sessionId);
   if (busy !== undefined) return { ok: false, reason: busy };
   const session = sessionById(ctx, payload?.sessionId);
   if (session === undefined) return { ok: false, reason: `no live session ${JSON.stringify(payload?.sessionId)}` };

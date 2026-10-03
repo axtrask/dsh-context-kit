@@ -1167,11 +1167,15 @@ async function mountedPanel(replyBlocks, options = {}) {
   const ctx = {
     get: (key) => (key === 'sessions'
       ? { get: (id) => (String(id) === String(session.id) ? session : undefined) }
-      : key === 'connection'
-        ? { rpc: { handle: () => {} } }
-        : key === 'webServer'
-          ? { register: (route) => { routes.push(route); return () => {}; }, tapIndex: () => () => {} }
-          : undefined),
+      : key === 'agents'
+        ? options.hostAgent === undefined
+          ? undefined
+          : { get: (id) => (String(id) === String(session.id) ? options.hostAgent : undefined) }
+        : key === 'connection'
+          ? { rpc: { handle: () => {} } }
+          : key === 'webServer'
+            ? { register: (route) => { routes.push(route); return () => {}; }, tapIndex: () => () => {} }
+            : undefined),
     effect: (body) => body()
   };
   const engine = {
@@ -1233,6 +1237,18 @@ ok('the Host refuses both edit and delete while the agent is running', async () 
   }
   assert.equal(panel.wire.editsFor(panel.sessionId).length, 0);
   assert.equal(panel.session.snapshotEvents().filter((event) => event.type === 'user/message').length, 1);
+});
+
+ok('the Host guard resolves the running agent from the exact session registry', async () => {
+  const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], {
+    id: 'edit-gui-registry-idle-guard', hostAgent: { status: 'running' }, editor: { requireIdle: true }
+  });
+  const removed = await panel.answer(EDIT_METHODS.deleteTurn, {
+    sessionId: panel.sessionId, seq: panel.user.seq, id: panel.user.id, expected: 'QUESTION'
+  });
+  assert.equal(removed.body.result.value.ok, false, 'a direct RPC bypassed the Host generation guard');
+  assert.match(String(removed.body.result.value.reason), /stop generation/i);
+  assert.equal(panel.wire.editsFor(panel.sessionId).length, 0, 'a refused deletion wrote an overlay');
 });
 
 ok('requireIdle does not block a standalone Host editor with no agent service', async () => {
