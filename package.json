@@ -42,6 +42,7 @@
     "runtime-3",
     "runtime-4",
     "runtime-5",
+    "runtime-6",
     "cordis.patch.yml"
   ]
 }

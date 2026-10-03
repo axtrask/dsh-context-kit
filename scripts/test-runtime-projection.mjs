@@ -38,6 +38,7 @@ try {
     ['runtime-3', 'dsh-context-kit-runtime-3'],
     ['runtime-4', 'dsh-context-kit-runtime-4'],
     ['runtime-5', 'dsh-context-kit-runtime-5'],
+    ['runtime-6', 'dsh-context-kit-runtime-6'],
   ]) {
     const runtimeProjection = join(projectedModules, packageName);
     await symlink(join(root, directory), runtimeProjection, 'junction');
