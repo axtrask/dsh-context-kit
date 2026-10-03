@@ -22,9 +22,9 @@
  * ```
  *
  * The response is `{ type: "server-response", rpcId, result: { ok: true, value } }`
- * or `{ ok: false, error: { code, message, details } }`. Three methods exist:
- * `list` (the editable messages), `commit` (apply one replacement) and `status`
- * (config + counts). The panel also refreshes on session and transcript changes
+ * or `{ ok: false, error: { code, message, details } }`. Four methods exist:
+ * `list` (the editable messages), `commit` (apply one replacement), `deleteTurn`
+ * (hide one complete human turn) and `status` (config + counts). The panel also refreshes on session and transcript changes
  * so closed-panel Chat projections can display the effective text.
  *
  * ## What it deliberately does not do
@@ -79,10 +79,11 @@ export const EDIT_CHANNEL = '/ctxkit.edit';
 /** Element id of the host the injected script mounts into. */
 const HOST_ID = 'dsh-context-kit-editor';
 
-/** The three methods the browser side may call. */
+/** The four methods the browser side may call. */
 export const EDIT_METHODS = Object.freeze({
   list: 'contextKit.edit.list',
   commit: 'contextKit.edit.commit',
+  deleteTurn: 'contextKit.edit.deleteTurn',
   status: 'contextKit.edit.status'
 });
 
@@ -146,6 +147,8 @@ export function panelEntry(entry) {
     turn: entry.turn,
     step: entry.step,
     type: entry.type,
+    sourceKind: entry.sourceKind ?? entry.message?.source?.kind,
+    directUser: entry.directUser === true,
     text,
     chars: text.length,
     textBlocks: entry.blocks,
@@ -175,13 +178,47 @@ export function panelEntry(entry) {
 // Legacy preset engines remain readable while existing installations migrate.
 const editorConfig = runtime => runtime?.editorConfig ?? runtime?.dcpConfig?.editor;
 
+/** Host-authoritative mutation gate. Missing agent services are valid on a standalone Host editor. */
+function idleRefusal(engine) {
+  if (editorConfig(engine)?.requireIdle !== true) return undefined;
+  let status;
+  try { status = engine?.ctx?.get?.('agent')?.status; } catch { status = undefined; }
+  return status !== undefined && status !== 'idle'
+    ? 'Generation is running. Stop generation before editing or deleting history.'
+    : undefined;
+}
+
 function listValue(ctx, engine, sessionId) {
   const session = sessionById(ctx, sessionId);
   if (session === undefined) {
     return { ok: false, reason: `no live session ${JSON.stringify(sessionId)}; the server does not have it open` };
   }
   const edits = editorConfig(engine)?.enabled === true ? editStoreFor(sessionId)?.editsFor(sessionId) ?? [] : [];
-  const entries = effectiveEditableIndex(session, edits).map(panelEntry);
+  const rawEntries = editableIndex(session);
+  const effectiveEntries = effectiveEditableIndex(session, edits);
+  const survivingSeqs = new Set(effectiveEntries.flatMap((entry) => [entry.seq, entry.originSeq]).filter(Number.isInteger));
+  const hiddenSeqs = new Set(rawEntries.filter((entry) => !survivingSeqs.has(entry.seq)).map((entry) => entry.seq));
+  const deletedTurnSeqs = new Set();
+  for (let start = 0; start < rawEntries.length; start += 1) {
+    if (rawEntries[start].directUser !== true || !hiddenSeqs.has(rawEntries[start].seq)) continue;
+    let end = start + 1;
+    while (end < rawEntries.length && rawEntries[end].directUser !== true) end += 1;
+    const members = rawEntries.slice(start, end);
+    if (members.every((entry) => hiddenSeqs.has(entry.seq))) {
+      for (const entry of members) deletedTurnSeqs.add(entry.seq);
+    }
+    start = end - 1;
+  }
+  const hidden = rawEntries.filter((entry) => hiddenSeqs.has(entry.seq)).map((entry) => ({
+    type: entry.type,
+    id: entry.id,
+    originId: entry.id,
+    turn: entry.turn,
+    step: entry.step,
+    directUser: entry.directUser === true,
+    deletedTurn: deletedTurnSeqs.has(entry.seq)
+  }));
+  const entries = effectiveEntries.map(panelEntry);
   const editable = entries.filter((entry) => entry.editable);
   return {
     ok: true,
@@ -193,6 +230,8 @@ function listValue(ctx, engine, sessionId) {
     entries: entries.slice(-40),
     /** Chat projections include old edited rows outside the panel's window. */
     transcript: entries,
+    /** Native Chat rows covered by applied deletion tombstones. */
+    hidden,
     listing: renderEditableList(session, { entries })
   };
 }
@@ -216,6 +255,8 @@ function commitValue(ctx, engine, payload) {
   if (config?.enabled !== true) {
     return { ok: false, reason: 'the history editor is disabled; enable History Editor in Settings > Plugins' };
   }
+  const busy = idleRefusal(engine);
+  if (busy !== undefined) return { ok: false, reason: busy };
   const session = sessionById(ctx, payload?.sessionId);
   if (session === undefined) return { ok: false, reason: `no live session ${JSON.stringify(payload?.sessionId)}` };
   const store = editStoreFor(payload?.sessionId);
@@ -274,7 +315,7 @@ function commitValue(ctx, engine, payload) {
       return { ok: false, reason: 'no wire store is mounted for this session, so an assistant edit has nowhere to go; reload the server' };
     }
     const recorded = store.record(String(payload?.sessionId), entry.message, text, {
-      messageIndex: entry.index,
+      messageIndex: entry.effectiveIndex ?? entry.index,
       messageId: entry.id,
       expected,
       blockAt: cursor,
@@ -298,6 +339,53 @@ function commitValue(ctx, engine, payload) {
   const result = commitUserEdit(session, entry, text, { blockAt: at, source: { kind: 'plugin:context-kit-editor' } });
   if (result?.ok !== true) return { ok: false, reason: result?.reason ?? 'the durable branch refused the edit' };
   return { ok: true, report: { ...result.report, branch: DURABLE_BRANCH } };
+}
+
+/** Record an effective-history tombstone for one direct human message and its complete turn. */
+function deleteTurnValue(ctx, engine, payload) {
+  const config = editorConfig(engine);
+  if (config?.enabled !== true) {
+    return { ok: false, reason: 'the history editor is disabled; enable History Editor in Settings > Plugins' };
+  }
+  const busy = idleRefusal(engine);
+  if (busy !== undefined) return { ok: false, reason: busy };
+  const session = sessionById(ctx, payload?.sessionId);
+  if (session === undefined) return { ok: false, reason: `no live session ${JSON.stringify(payload?.sessionId)}` };
+  const store = editStoreFor(payload?.sessionId);
+  if (store === undefined) {
+    return { ok: false, reason: 'no wire store is mounted for this session, so the turn cannot be deleted; reload the server' };
+  }
+  const entries = effectiveEditableIndex(session, store.editsFor(payload?.sessionId) ?? []);
+  const at = entries.findIndex((candidate) => Number(candidate.seq) === Number(payload?.seq));
+  if (at < 0) {
+    return { ok: false, reason: `message seq ${String(payload?.seq)} is not on the surface any more; reload the list` };
+  }
+  const entry = entries[at];
+  if (payload?.id !== undefined && String(entry.id) !== String(payload.id)) {
+    return { ok: false, reason: `seq ${String(payload.seq)} now holds a different message (${String(entry.id)}); reload the list` };
+  }
+  if (entry.directUser !== true) return { ok: false, reason: 'only a direct user message can anchor a turn deletion' };
+  if (payload?.expected !== undefined && payload.expected !== entry.text) {
+    return { ok: false, reason: 'the selected message changed since deletion was requested; reload the list' };
+  }
+  const messages = entries.map((candidate) => candidate.message);
+  const recorded = store.deleteTurn(String(payload.sessionId), messages, {
+    messageIndex: at,
+    messageId: entry.id,
+    expected: entry.text
+  });
+  if (recorded?.ok !== true) return { ok: false, reason: recorded?.reason ?? 'the turn deletion was refused' };
+  return {
+    ok: true,
+    report: {
+      branch: WIRE_BRANCH,
+      seq: entry.seq,
+      messageId: entry.id,
+      editId: recorded.edit?.id,
+      removedIds: recorded.edit?.members?.map((member) => member.id) ?? [],
+      note: 'hidden from the next request the provider sees; the session log keeps the original turn'
+    }
+  };
 }
 
 /**
@@ -373,6 +461,7 @@ export function installEditGui(ctx, engine) {
       handler: createChannelHandler(EDIT_CHANNEL, (method, payload) => {
       if (method === EDIT_METHODS.list) return listValue(ctx, requestEngine(), payload?.sessionId);
       if (method === EDIT_METHODS.commit) return commitValue(ctx, requestEngine(), payload);
+      if (method === EDIT_METHODS.deleteTurn) return deleteTurnValue(ctx, requestEngine(), payload);
       if (method === EDIT_METHODS.status) {
         const active = engine ?? engineFromBridge();
         const session = sessionById(ctx, payload?.sessionId);

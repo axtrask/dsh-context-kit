@@ -212,7 +212,7 @@ ok('both served stylesheets keep their rules and browser escape layers', () => {
     assert.ok(text.includes('\n'), `${name} CSS lost its line separators`);
     assert.ok(!text.includes('\\n'), `${name} CSS contains literal backslash-n instead of newlines`);
   }
-  assert.ok(css.startsWith(':host { all: initial; }\n'));
+  assert.ok(css.startsWith(':host { all: initial;'), 'panel CSS must begin by resetting the shadow host');
   assert.ok(css.includes('.wrap.open { display: block; }'));
   assert.ok(css.includes('width: min(760px, 92vw)'));
   assert.ok(css.includes('button:disabled { opacity: .5; cursor: default; }'));
@@ -348,7 +348,7 @@ ok('installed client registry discovers the absolute host row through its neares
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
   assert.equal(pkg.name, 'dsh-context-kit');
   assert.equal(pkg.exports['./client'], './lib/edit-client.js');
-  const clientDependencies = ['@deepseek-ai/dsh-api-session-controller', '@deepseek-ai/dsh-client-ui-settings-plugins'];
+  const clientDependencies = ['@deepseek-ai/dsh-api-session-controller', '@deepseek-ai/dsh-client-ui-settings', '@deepseek-ai/dsh-client-ui-settings-plugins'];
   assert.deepEqual(pkg.dsh.client, { platform: 'web', inject: clientDependencies });
   const root = new Context();
   const host = join(ROOT, 'lib', 'edit-host.js');
@@ -364,7 +364,7 @@ ok('installed client registry discovers the absolute host row through its neares
     assert.deepEqual(module.inject, clientDependencies);
     assert.equal(registry.clientPath(pkg.name), join(ROOT, 'lib', 'edit-client.js'));
     assert.ok(bootInjections(graph).find(row => row.name === '__DSH_BOOT__').value.entries.includes(module));
-    const response = registry.fetchBundle(new Request(new URL(module.url, 'https://editor.invalid')));
+    const response = await registry.fetchBundle(new Request(new URL(module.url, 'https://editor.invalid')));
     assert.equal(response.status, 200);
     assert.ok((await response.text()).includes('__DSH_CONTEXT_KIT_SESSION__'));
   } finally { await scope.dispose(); }
@@ -381,13 +381,13 @@ ok('Chat CSS tokens match only the two complete module naming formats', () => {
   }
 });
 
-ok('the three methods the browser may call are the three the channel answers', () => {
+ok('the four methods the browser may call are the four the channel answers', () => {
   const source = readFileSync(join(ROOT, 'lib', 'edit-gui.js'), 'utf8');
   for (const method of Object.values(EDIT_METHODS)) {
     assert.ok(source.includes(`'${method}'`), `${method} is not named in the module`);
     assert.ok(injectEditor(PAGE).includes(`'${method}'`), `${method} is never called by the panel`);
   }
-  assert.deepEqual(Object.keys(EDIT_METHODS).sort(), ['commit', 'list', 'status']);
+  assert.deepEqual(Object.keys(EDIT_METHODS).sort(), ['commit', 'deleteTurn', 'list', 'status']);
 });
 
 ok('the panel refuses nothing silently: refusals are shown as text', () => {
@@ -756,6 +756,150 @@ ok('a reply row is named by the turn and the step, because it carries no id', ()
   }
 });
 
+ok('turn deletion is offered only for a direct human message', () => {
+  const { canDeleteTurn } = panelConsts(injectEditor(PAGE), ['canDeleteTurn']);
+  assert.equal(canDeleteTurn({ type: 'user/message', directUser: true }), true);
+  for (const entry of [
+    { type: 'user/message', directUser: false },
+    { type: 'user/message' },
+    { type: 'assistant/message', directUser: true },
+    { type: 'tool/result', directUser: true },
+    undefined
+  ]) assert.equal(canDeleteTurn(entry), false, JSON.stringify(entry));
+});
+
+ok('grouped seats use their canonical reply key and deleted turns include auxiliary flow rows', () => {
+  const script = injectEditor(PAGE);
+  const { stepOf, turnOf, deletedTurnsOf, deletedEntryFor } = panelConsts(script, [
+    'flowBody', 'messageIdOf', 'turnOf', 'stepPrefix', 'stepOf', 'entryFor', 'targetOf', 'deletedTurnsOf', 'deletedEntryFor'
+  ]);
+  const row = (attributes) => ({ getAttribute: (name) => attributes[name] ?? null });
+  const grouped = row({
+    'data-chat-flow-kind': 'assistant-step',
+    'data-chat-node-key': '14:assistant-step8:2',
+    'data-chat-flow-key': '["14:assistant-step8:2","reasoning"]',
+    'data-chat-turn': '8'
+  });
+  assert.deepEqual(stepOf(grouped), { turn: 8, step: 2 }, 'the grouped member seat did not use data-chat-node-key');
+  assert.equal(turnOf(grouped), 8);
+  assert.equal(turnOf(row({})), undefined, 'a missing turn must not become turn zero');
+
+  const hidden = [{ type: 'assistant/message', turn: 8, step: 2, id: 'reply-8', deletedTurn: true }];
+  const hiddenTurns = deletedTurnsOf(hidden);
+  assert.deepEqual([...hiddenTurns], [8]);
+  assert.deepEqual([...deletedTurnsOf([{ type: 'assistant/message', turn: 8, step: 2 }])], [],
+    'a future partial hide must not hide the complete process group');
+  assert.equal(deletedEntryFor(hidden, hiddenTurns, grouped)?.turn, 8, 'the grouped reply seat stayed visible');
+  for (const auxiliary of [
+    row({ 'data-chat-flow-kind': 'tool', 'data-chat-flow-key': '15:tool-call8', 'data-chat-turn': '8' }),
+    row({ 'data-chat-flow-key': '12:turn-process8', 'data-chat-turn': '8' }),
+    row({ 'data-chat-flow-key': '9:turn-tail8', 'data-chat-turn': '8' })
+  ]) assert.equal(deletedEntryFor(hidden, hiddenTurns, auxiliary)?.turn, 8, 'an auxiliary row in the deleted turn stayed visible');
+  assert.equal(deletedEntryFor(hidden, hiddenTurns, row({ 'data-chat-turn': '9' })), undefined,
+    'a neighboring turn was hidden');
+  assert.equal(deletedEntryFor([{ type: 'user/message', originId: 'u1' }], new Set(),
+    row({ 'data-chat-flow-kind': 'user', 'data-chat-flow-key': '13:input-messageu1' }))?.originId, 'u1',
+  'a deleted user-only turn must still match by origin id');
+});
+
+ok('deleted-row markers are reversible without touching native visibility or DOM ownership', () => {
+  const { HIDDEN_TURN_ATTR, setDeletedVisibility } = panelConsts(injectEditor(PAGE), [
+    'HIDDEN_TURN_ATTR', 'hiddenRows', 'setDeletedVisibility'
+  ]);
+  const parent = fakeElement('div');
+  const before = fakeElement('span');
+  const row = fakeElement('article');
+  const after = fakeElement('span');
+  parent.append(before, row, after);
+  row.hidden = false;
+  row.style.display = 'grid';
+  const children = [...parent.children];
+
+  setDeletedVisibility(row, true);
+  assert.equal(row.hasAttribute(HIDDEN_TURN_ATTR), true);
+  setDeletedVisibility(row, true);
+  assert.deepEqual(parent.children, children, 're-decoration changed native child order');
+  assert.equal(row.parentNode, parent, 're-decoration reparented a React-owned row');
+  assert.equal(row.hidden, false, 'native hidden state was changed');
+  assert.equal(row.style.display, 'grid', 'native display state was changed');
+  setDeletedVisibility(row, false);
+  assert.equal(row.hasAttribute(HIDDEN_TURN_ATTR), false, 'the plugin-owned marker was not restored');
+
+  const native = fakeElement('article');
+  native.setAttribute(HIDDEN_TURN_ATTR, 'native');
+  setDeletedVisibility(native, true);
+  setDeletedVisibility(native, false);
+  assert.equal(native.getAttribute(HIDDEN_TURN_ATTR), 'native', 'a pre-existing native marker was clobbered');
+});
+
+ok('re-decoration keeps exactly one delete action on a direct human row', () => {
+  globalThis.__ctxkitDeleteDocument = { createElement: (tag) => fakeElement(tag) };
+  const { placeDeleteAction } = panelConsts(injectEditor(PAGE), [
+    'canDeleteTurn', 'placeDeleteAction'
+  ], [
+    'const document = globalThis.__ctxkitDeleteDocument;',
+    'const DELETE_ACTION_ATTR = "data-ctxkit-delete";',
+    'const requestTurnDeletion = () => {};',
+    'const userActionStrip = (node) => node;',
+    'const textLayout = () => ({ containers: [] });'
+  ].join('\n'));
+  const row = fakeElement('article');
+  const entry = { type: 'user/message', directUser: true, seq: 17 };
+  placeDeleteAction(row, entry);
+  const first = row.querySelector('[data-ctxkit-delete]');
+  placeDeleteAction(row, entry);
+  assert.equal(row.querySelectorAll('[data-ctxkit-delete]').length, 1, 'a second decoration duplicated Delete turn');
+  assert.equal(row.querySelector('[data-ctxkit-delete]'), first, 'a stable delete action was unnecessarily replaced');
+  delete globalThis.__ctxkitDeleteDocument;
+});
+
+ok('turn deletion waits for confirmation, sends the exact payload, and refreshes only after Host success', async () => {
+  globalThis.__ctxkitDelete = { running: false, confirmation: null, calls: [], loads: 0, notices: [], answer: { ok: true } };
+  const { STATE, requestTurnDeletion } = panelConsts(injectEditor(PAGE), [
+    'STATE', 'entryFor', 'canDeleteTurn', 'requestTurnDeletion'
+  ], [
+    'const syncSession = () => {};',
+    'const generationRunning = () => globalThis.__ctxkitDelete.running;',
+    'const say = (message, kind) => globalThis.__ctxkitDelete.notices.push([message, kind]);',
+    'const leaveDraft = () => true;',
+    'const askConfirmation = (title, message, action, accept, cancel) => { globalThis.__ctxkitDelete.confirmation = { title, message, action, accept, cancel }; };',
+    'const call = async (method, payload) => { globalThis.__ctxkitDelete.calls.push([method, payload]); return globalThis.__ctxkitDelete.answer; };',
+    'const isCurrent = () => true;',
+    'const load = async () => { globalThis.__ctxkitDelete.loads += 1; return true; };',
+    'const STOP_GENERATION = "Generation is running. Stop generation before editing or deleting history.";'
+  ].join('\n'));
+  const entry = { type: 'user/message', directUser: true, originId: 'origin-u', id: 'wire-u', seq: 17, text: 'question' };
+  STATE.sessionId = 'session-a';
+  STATE.epoch = 4;
+  STATE.transcript = [entry];
+
+  requestTurnDeletion(entry, { isConnected: true, disabled: false });
+  assert.equal(globalThis.__ctxkitDelete.confirmation.cancel, 'Cancel');
+  assert.deepEqual(globalThis.__ctxkitDelete.calls, [], 'opening or cancelling confirmation must not call delete');
+  assert.equal(globalThis.__ctxkitDelete.loads, 0, 'opening confirmation must not refresh');
+  await globalThis.__ctxkitDelete.confirmation.accept();
+  assert.deepEqual(globalThis.__ctxkitDelete.calls, [[EDIT_METHODS.deleteTurn, {
+    sessionId: 'session-a', seq: 17, id: 'wire-u', expected: 'question'
+  }]]);
+  assert.equal(globalThis.__ctxkitDelete.loads, 1, 'Host success must refresh exactly once');
+
+  globalThis.__ctxkitDelete.confirmation = null;
+  globalThis.__ctxkitDelete.running = true;
+  requestTurnDeletion(entry);
+  assert.equal(globalThis.__ctxkitDelete.confirmation, null, 'running generation opened deletion UI');
+  assert.equal(globalThis.__ctxkitDelete.notices.at(-1)[0], 'Generation is running. Stop generation before editing or deleting history.');
+
+  globalThis.__ctxkitDelete.running = false;
+  globalThis.__ctxkitDelete.answer = { ok: false, reason: 'generation won the race' };
+  requestTurnDeletion(entry);
+  const before = STATE.transcript;
+  await globalThis.__ctxkitDelete.confirmation.accept();
+  assert.equal(globalThis.__ctxkitDelete.loads, 1, 'Host refusal must not refresh or hide anything');
+  assert.equal(STATE.transcript, before, 'Host refusal optimistically replaced the transcript');
+  assert.match(globalThis.__ctxkitDelete.notices.at(-1)[0], /generation won the race/u);
+  delete globalThis.__ctxkitDelete;
+});
+
 ok('a rewritten row requires exact verified provenance, never an id suffix guess', () => {
   const script = injectEditor(PAGE);
   const { entryFor } = panelConsts(script, ['entryFor']);
@@ -854,6 +998,7 @@ function fakeElement(tag) {
     listeners: new Map(),
     shadowRoot: null,
     parentNode: null,
+    isConnected: false,
     style: { position: '' },
     className: '',
     textContent: '',
@@ -861,10 +1006,13 @@ function fakeElement(tag) {
     type: '',
     setAttribute(name, value) { element.attributes.set(name, String(value)); },
     getAttribute(name) { return element.attributes.has(name) ? element.attributes.get(name) : null; },
+    hasAttribute(name) { return element.attributes.has(name); },
+    removeAttribute(name) { element.attributes.delete(name); },
     closest() { return null; },
     append(...nodes) {
       for (const node of nodes) {
         node.parentNode = element;
+        node.isConnected = true;
         element.children.push(node);
       }
     },
@@ -873,6 +1021,7 @@ function fakeElement(tag) {
       const at = element.parentNode.children.indexOf(element);
       if (at >= 0) element.parentNode.children.splice(at, 1);
       element.parentNode = null;
+      element.isConnected = false;
     },
     addEventListener(name, handler) {
       element.listeners.set(name, [...(element.listeners.get(name) ?? []), handler]);
@@ -891,6 +1040,8 @@ function fakeElement(tag) {
       if (selector.includes('data-ctxkit-pencil')) {
         return element.children.filter((child) => child.getAttribute('data-ctxkit-pencil') !== null);
       }
+      const attribute = /^\[([^\]]+)\]$/u.exec(selector)?.[1];
+      if (attribute) return element.children.filter((child) => child.getAttribute(attribute) !== null);
       return [];
     },
     querySelector(selector) {
@@ -953,7 +1104,10 @@ async function mountedPanel(replyBlocks, options = {}) {
           : undefined),
     effect: (body) => body()
   };
-  const engine = { dcpConfig: { editor: { enabled: true } } };
+  const engine = {
+    ctx: { get: (key) => key === 'agent' ? options.agent : undefined },
+    dcpConfig: { editor: { enabled: true, ...options.editor } }
+  };
   installEditGui(ctx, engine);
   assert.equal(routes.length, 1, 'the commit path needs the panel route to be mounted');
   const wire = createEditStore({ restore: false });
@@ -965,6 +1119,61 @@ async function mountedPanel(replyBlocks, options = {}) {
     reload() { session = Session.create(session.id, session.snapshotEvents()); }
   };
 }
+
+ok('the list identifies only direct human messages as turn-deletion anchors', async () => {
+  const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], { id: 'edit-gui-direct-user' });
+  const value = (await panel.answer(EDIT_METHODS.list, { sessionId: panel.sessionId })).body.result.value;
+  const user = value.transcript.find((entry) => entry.type === 'user/message');
+  const reply = value.transcript.find((entry) => entry.type === 'assistant/message');
+  assert.equal(user.sourceKind, 'user');
+  assert.equal(user.directUser, true);
+  assert.equal(reply.directUser, false);
+});
+
+ok('the delete route tombstones one complete human turn without mutating the log', async () => {
+  const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], { id: 'edit-gui-delete-turn' });
+  const before = panel.session.snapshotEvents();
+  const removed = await panel.answer(EDIT_METHODS.deleteTurn, {
+    sessionId: panel.sessionId, seq: panel.user.seq, id: panel.user.id, expected: 'QUESTION'
+  });
+  assert.equal(removed.body.result.value.ok, true, String(removed.body.result.value.reason));
+  assert.equal(panel.session.snapshotEvents().length, before.length, 'turn deletion must not mutate the session log');
+  assert.equal(panel.wire.editsFor(panel.sessionId).at(-1)?.kind, 'delete-turn');
+  const listed = (await panel.answer(EDIT_METHODS.list, { sessionId: panel.sessionId })).body.result.value;
+  assert.deepEqual(listed.transcript, [], 'the deleted user message and its assistant reply must be absent from effective history');
+  assert.deepEqual(listed.hidden.map((entry) => entry.type), ['user/message', 'assistant/message'],
+    'the browser was not told which native Chat rows belong to the deleted turn');
+  assert.deepEqual(listed.hidden.map((entry) => entry.deletedTurn), [true, true],
+    'the browser cannot distinguish a complete deleted turn from a future partial hide');
+  assert.deepEqual(listed.hidden.map((entry) => entry.directUser), [true, false],
+    'the hidden turn lost its direct-human boundary');
+});
+
+ok('the Host refuses both edit and delete while the agent is running', async () => {
+  const agent = { status: 'running' };
+  const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], {
+    id: 'edit-gui-idle-guard', agent, editor: { requireIdle: true }
+  });
+  const payload = { sessionId: panel.sessionId, seq: panel.user.seq, id: panel.user.id, expected: 'QUESTION' };
+  const edited = await panel.answer(EDIT_METHODS.commit, { ...payload, text: 'CHANGED' });
+  const removed = await panel.answer(EDIT_METHODS.deleteTurn, payload);
+  for (const result of [edited, removed]) {
+    assert.equal(result.body.result.value.ok, false);
+    assert.match(String(result.body.result.value.reason), /stop generation/i);
+  }
+  assert.equal(panel.wire.editsFor(panel.sessionId).length, 0);
+  assert.equal(panel.session.snapshotEvents().filter((event) => event.type === 'user/message').length, 1);
+});
+
+ok('requireIdle does not block a standalone Host editor with no agent service', async () => {
+  const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], {
+    id: 'edit-gui-idle-absent', editor: { requireIdle: true }
+  });
+  const removed = await panel.answer(EDIT_METHODS.deleteTurn, {
+    sessionId: panel.sessionId, seq: panel.user.seq, id: panel.user.id, expected: 'QUESTION'
+  });
+  assert.equal(removed.body.result.value.ok, true, String(removed.body.result.value.reason));
+});
 
 /* -------------------------------------------------- the targets of a message */
 
@@ -1125,19 +1334,23 @@ ok('a row draws one pencil per editable target, keyed by seq and block', () => {
   row.setAttribute('data-chat-flow-key', '14:assistant-step1:1');
   row.setAttribute('data-chat-flow-kind', 'assistant-step');
   globalThis.__ctxkitOpened = [];
+  globalThis.__ctxkitGeneration = { running: false, notices: [] };
   globalThis.__ctxkitDocument = {
     querySelectorAll: (selector) => (selector === '[data-chat-flow] > [data-chat-flow-key]' ? [row] : []),
     createTextNode: (text) => Object.assign(fakeElement('#text'), { textContent: text }),
     createElement: (tag) => fakeElement(tag)
   };
   const { STATE, decorateTranscript, pinCss } = panelConsts(script, [
-    'STATE', 'targetsOf', 'labelOf', 'optionValue', 'fallbackTarget', 'FLOW_SELECTOR', 'PENCIL_ATTR', 'chatRows', 'running',
-    'flowBody', 'messageIdOf', 'stepPrefix', 'stepOf', 'pinCss', 'parseKey', 'keyOf',
+    'STATE', 'targetsOf', 'labelOf', 'optionValue', 'fallbackTarget', 'FLOW_SELECTOR', 'PENCIL_ATTR', 'flowRows', 'chatRows', 'running',
+    'flowBody', 'messageIdOf', 'turnOf', 'stepPrefix', 'stepOf', 'pinCss', 'parseKey', 'keyOf',
     'pointed', 'pointerOnce', 'pointerEdit', 'pinAt', 'INNER_CONTROL', 'GESTURE_GRACE',
-    'hovered', 'hoverOnce', 'addPencil', 'entryFor', 'targetOf', 'pinTargets', 'sameTarget',
+    'hovered', 'hoverOnce', 'addPencil', 'entryFor', 'targetOf', 'deletedTurnsOf', 'deletedEntryFor', 'pinTargets', 'sameTarget',
     'projections', 'pinnedRows', 'unavailableRows', 'rowOwners', 'decorateTranscript'
   ], [
     'const document = globalThis.__ctxkitDocument;',
+    'const installAffordance = () => {}; const setDeletedVisibility = () => {};',
+    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const placeDeleteAction = () => {};',
+    'const generationRunning = () => globalThis.__ctxkitGeneration.running; const STOP_GENERATION = "Generation is running. Stop generation before editing or deleting history."; const say = (message, kind) => globalThis.__ctxkitGeneration.notices.push([message, kind]);',
     'const getComputedStyle = () => ({ position: "static" });',
     'const projectRow = () => {};', // Display projection is driven by the full browser regression.
     'const placePencil = () => {};', // Geometry and native anchoring are covered in Chromium.
@@ -1195,6 +1408,13 @@ ok('a row draws one pencil per editable target, keyed by seq and block', () => {
     ['Edit thinking (seq 15, block 0)', 'Edit answer (seq 15, block 1)']);
   pins()[0].shadowRoot.children[1].dispatch('click');
   assert.deepEqual(globalThis.__ctxkitOpened, [[15, 0]], 'the thinking pencil opened the wrong target');
+  globalThis.__ctxkitGeneration.running = true;
+  pins()[1].shadowRoot.children[1].dispatch('click');
+  assert.deepEqual(globalThis.__ctxkitOpened, [[15, 0]], 'editing opened while generation was running');
+  assert.equal(globalThis.__ctxkitGeneration.notices.at(-1)[0],
+    'Generation is running. Stop generation before editing or deleting history.');
+  assert.equal(pins().length, 2, 'generation hid the visible edit controls');
+  globalThis.__ctxkitGeneration.running = false;
   pins()[1].shadowRoot.children[1].dispatch('click');
   assert.deepEqual(globalThis.__ctxkitOpened, [[15, 0], [15, 1]], 'the answer pencil opened the wrong target');
   // A re-decoration adds nothing, and a marker in the OLD shape (a bare seq) is replaced
@@ -1228,19 +1448,23 @@ ok('a pencil is not drawn for a target that cannot be rewritten', () => {
   row.setAttribute('data-chat-flow-key', '14:assistant-step1:1');
   row.setAttribute('data-chat-flow-kind', 'assistant-step');
   globalThis.__ctxkitOpened = [];
+  globalThis.__ctxkitGeneration = { running: false, notices: [] };
   globalThis.__ctxkitDocument = {
     querySelectorAll: (selector) => (selector === '[data-chat-flow] > [data-chat-flow-key]' ? [row] : []),
     createTextNode: (text) => Object.assign(fakeElement('#text'), { textContent: text }),
     createElement: (tag) => fakeElement(tag)
   };
   const { STATE, decorateTranscript } = panelConsts(script, [
-    'STATE', 'targetsOf', 'labelOf', 'optionValue', 'fallbackTarget', 'FLOW_SELECTOR', 'PENCIL_ATTR', 'chatRows', 'running',
-    'flowBody', 'messageIdOf', 'stepPrefix', 'stepOf', 'pinCss', 'parseKey', 'keyOf',
+    'STATE', 'targetsOf', 'labelOf', 'optionValue', 'fallbackTarget', 'FLOW_SELECTOR', 'PENCIL_ATTR', 'flowRows', 'chatRows', 'running',
+    'flowBody', 'messageIdOf', 'turnOf', 'stepPrefix', 'stepOf', 'pinCss', 'parseKey', 'keyOf',
     'pointed', 'pointerOnce', 'pointerEdit', 'pinAt', 'INNER_CONTROL', 'GESTURE_GRACE',
-    'hovered', 'hoverOnce', 'addPencil', 'entryFor', 'targetOf', 'pinTargets', 'sameTarget',
+    'hovered', 'hoverOnce', 'addPencil', 'entryFor', 'targetOf', 'deletedTurnsOf', 'deletedEntryFor', 'pinTargets', 'sameTarget',
     'projections', 'pinnedRows', 'unavailableRows', 'rowOwners', 'decorateTranscript'
   ], [
     'const document = globalThis.__ctxkitDocument;',
+    'const installAffordance = () => {}; const setDeletedVisibility = () => {};',
+    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const placeDeleteAction = () => {};',
+    'const generationRunning = () => globalThis.__ctxkitGeneration.running; const STOP_GENERATION = "Generation is running. Stop generation before editing or deleting history."; const say = (message, kind) => globalThis.__ctxkitGeneration.notices.push([message, kind]);',
     'const getComputedStyle = () => ({ position: "static" });',
     'const projectRow = () => {};',
     'const placePencil = () => {};',

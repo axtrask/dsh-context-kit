@@ -2,7 +2,7 @@ export function createPanelScript(channel) {
   return `
 const HOST = document.getElementById('dsh-context-kit-editor');
 if (HOST && HOST.shadowRoot === null) {
-  const STATE = { sessionId: '', epoch: 0, request: 0, open: false, listed: false, entries: [], transcript: [], draft: null, pending: null };
+  const STATE = { sessionId: '', epoch: 0, request: 0, open: false, listed: false, entries: [], transcript: [], hidden: [], draft: null, pending: null };
   const drafts = new Map();
   // Open shadow roots isolate CSS while keeping the mount guard and browser checks usable.
   const root = HOST.attachShadow({ mode: 'open' });
@@ -60,8 +60,9 @@ if (HOST && HOST.shadowRoot === null) {
     'header .sub { color: #9aa3b2; }',
     'header .spacer { flex: 1; }',
     'button { font-family: inherit; line-height: inherit; }',
-    '.x, .edit { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; min-height: 32px; padding: 4px 10px; border: 1px solid transparent; border-radius: 7px; corner-shape: round; background: transparent; color: var(--studio-muted, #b9c0cc); cursor: pointer; }',
-    '.x:hover, .edit:hover { background: var(--studio-hover, #1d2129); color: var(--studio-ink, #e8eaed); }',
+    '.x, .edit, .delete { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; min-height: 32px; padding: 4px 10px; border: 1px solid transparent; border-radius: 7px; corner-shape: round; background: transparent; color: var(--studio-muted, #b9c0cc); cursor: pointer; }',
+    '.x:hover, .edit:hover, .delete:hover { background: var(--studio-hover, #1d2129); color: var(--studio-ink, #e8eaed); }',
+    '.delete { color: var(--dsw-alias-label-critical, #d67869); }',
     '.note { margin: 0; padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,.08); color: #b9c0cc; }',
     '.doctrine { margin: 0; padding: 10px 16px 10px 32px; border-bottom: 1px solid rgba(255,255,255,.08); color: #8f98a8; font-size: 12px; }',
     'ul.list { list-style: none; margin: 0; padding: 8px; overflow: auto; flex: 1; }',
@@ -71,7 +72,7 @@ if (HOST && HOST.shadowRoot === null) {
     '.badge { color: #8ee0a8; } .badge.refused { color: #ffb58f; }',
     '.meta .n { color: #e8eaed; font-weight: 650; }',
     '.text { white-space: pre-wrap; word-break: break-word; max-height: 7.5em; overflow: hidden; }',
-    '.row.open .text, .row.open .edit { display: none; }',
+    '.row.open .text, .row.open .edit, .row.open .delete { display: none; }',
     'textarea { width: 100%; min-height: 8em; resize: vertical; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,.18);',
     '  background: #0f1216; color: #e8eaed; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }',
     'select.target { max-width: 100%; padding: 5px 8px; border-radius: 8px; border: 1px solid rgba(255,255,255,.18); background: #0f1216; color: #e8eaed; }',
@@ -84,7 +85,7 @@ if (HOST && HOST.shadowRoot === null) {
     '.save svg, .x svg { display: block; width: 16px; height: 16px; }',
     'button:disabled { opacity: .5; cursor: default; }',
     'button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--studio-accent, #8caaff); outline-offset: 2px; }',
-    '@media (pointer: coarse) { button, select.target { min-width: 44px; min-height: 44px; } .save, .x, .edit, .cancel, .restore { min-width: 44px; min-height: 44px; } textarea, select.target { font-size: 16px; } }',
+    '@media (pointer: coarse) { button, select.target { min-width: 44px; min-height: 44px; } .save, .x, .edit, .delete, .cancel, .restore { min-width: 44px; min-height: 44px; } textarea, select.target { font-size: 16px; } }',
     'footer { padding: 10px 16px; border-top: 1px solid rgba(255,255,255,.1); color: #9aa3b2; font-size: 12px; min-height: 38px; }',
     'footer.err { color: #ff9a9a; }',
     'footer.good { color: #8ee0a8; }'
@@ -138,7 +139,7 @@ if (HOST && HOST.shadowRoot === null) {
     if (accepted && pending.session === currentSessionId() && pending.epoch === STATE.epoch
       && pending.draft === STATE.draft && !STATE.draft?.save.disabled) pending.accept();
   };
-  const askConfirmation = (title, message, action, accept) => {
+  const askConfirmation = (title, message, action, accept, cancel = 'Keep editing') => {
     if (confirming) return;
     let focus = document.activeElement;
     while (focus?.shadowRoot?.activeElement) focus = focus.shadowRoot.activeElement;
@@ -146,6 +147,7 @@ if (HOST && HOST.shadowRoot === null) {
     confirmation.querySelector('h3').textContent = title;
     confirmation.querySelector('p').textContent = message;
     confirmation.querySelector('.accept').textContent = action;
+    confirmation.querySelector('.keep').textContent = cancel;
     confirmation.showModal();
     confirmation.querySelector('.keep').focus({ preventScroll: true });
   };
@@ -248,7 +250,18 @@ if (HOST && HOST.shadowRoot === null) {
     text.className = 'text';
     text.textContent = entry.text;
     row.append(meta, text);
+    const acts = document.createElement('div');
+    acts.className = 'acts';
+    if (canDeleteTurn(entry)) {
+      const remove = document.createElement('button');
+      remove.className = 'delete';
+      remove.type = 'button';
+      remove.textContent = 'Delete turn';
+      remove.addEventListener('click', () => requestTurnDeletion(entry, remove));
+      acts.append(remove);
+    }
     if (entry.editable === false) {
+      if (entry.directUser === true) row.append(acts);
       const why = document.createElement('div');
       why.className = 'why';
       why.textContent = 'cannot be edited here: ' + (entry.reason || 'refused');
@@ -258,13 +271,11 @@ if (HOST && HOST.shadowRoot === null) {
     // Prefer the displayed answer, not an earlier reasoning block in the content array.
     const offers = targetsOf(entry).filter((target) => target.editable === true);
     if (offers.length === 0) offers.push(fallbackTarget(entry));
-    const acts = document.createElement('div');
-    acts.className = 'acts';
     const edit = document.createElement('button');
     edit.className = 'edit';
     edit.type = 'button';
     edit.textContent = 'Edit';
-    acts.append(edit);
+    acts.prepend(edit);
     const picker = document.createElement('select');
     picker.className = 'target';
     picker.setAttribute('aria-label', 'Edit target for seq ' + entry.seq);
@@ -316,6 +327,7 @@ if (HOST && HOST.shadowRoot === null) {
     row.openEditor = (at) => {
       syncSession();
       if (!row.isConnected) return;
+      if (generationRunning()) { say(STOP_GENERATION, 'err'); return; }
       const target = Number.isInteger(at) ? offers.find((offer) => offer.at === at) : chosen();
       if (!target) return;
       if (STATE.draft?.row === row && optionValue(STATE.draft.target) === optionValue(target)) { row.focusEditor(); return; }
@@ -503,6 +515,53 @@ if (HOST && HOST.shadowRoot === null) {
     return result.value;
   };
 
+  const canDeleteTurn = (entry) => entry?.type === 'user/message' && entry.directUser === true;
+  const requestTurnDeletion = (entry, control) => {
+    syncSession();
+    if (generationRunning()) { say(STOP_GENERATION, 'err'); return; }
+    if (!leaveDraft(() => requestTurnDeletion(entry, control))) return;
+    const latest = entryFor(STATE.transcript, entry.originId);
+    if (!canDeleteTurn(latest)) {
+      say('This turn is no longer available; reopen the panel.', 'err');
+      return;
+    }
+    askConfirmation('Delete this turn?', 'The selected user message and all assistant work in its turn will be hidden from future model requests. The session log stays unchanged.', 'Delete turn', async () => {
+      syncSession();
+      if (generationRunning()) { say(STOP_GENERATION, 'err'); return; }
+      const current = entryFor(STATE.transcript, latest.originId);
+      if (!canDeleteTurn(current)) {
+        say('This turn is no longer available; reopen the panel.', 'err');
+        return;
+      }
+      const sessionId = STATE.sessionId;
+      const epoch = STATE.epoch;
+      STATE.request += 1;
+      if (control?.isConnected) control.disabled = true;
+      say('Deleting turn...');
+      try {
+        const value = await call('contextKit.edit.deleteTurn', {
+          sessionId,
+          seq: current.seq,
+          id: current.id,
+          expected: current.text
+        });
+        if (!isCurrent(sessionId, epoch)) return;
+        if (value.ok !== true) {
+          say('Not deleted. ' + (value.reason || 'The server refused the deletion.'), 'err');
+          return;
+        }
+        const loaded = await load(true);
+        if (isCurrent(sessionId, epoch) && loaded) {
+          say('Turn hidden from future model requests. The session log is unchanged.', 'good');
+        }
+      } catch (error) {
+        if (isCurrent(sessionId, epoch)) say('The request failed. ' + String(error && error.message || error), 'err');
+      } finally {
+        if (control?.isConnected) control.disabled = false;
+      }
+    }, 'Cancel');
+  };
+
   const isCurrent = (sessionId, epoch) => STATE.sessionId === sessionId && STATE.epoch === epoch && currentSessionId() === sessionId;
   const load = async (foreground = false) => {
     syncSession();
@@ -519,14 +578,16 @@ if (HOST && HOST.shadowRoot === null) {
         if (foreground || STATE.open) say(value.reason || 'the list is unavailable', 'err');
         STATE.entries = [];
         STATE.transcript = [];
+        STATE.hidden = [];
         STATE.listed = false;
         if (!STATE.draft) clearList();
         sub.textContent = '';
         decorateTranscript();
         return false;
       }
-      STATE.entries = value.entries || [];
-      STATE.transcript = value.transcript || STATE.entries;
+      STATE.entries = Array.isArray(value.entries) ? value.entries : [];
+      STATE.transcript = Array.isArray(value.transcript) ? value.transcript : STATE.entries;
+      STATE.hidden = Array.isArray(value.hidden) ? value.hidden : [];
       STATE.listed = true;
       const cleanDraft = STATE.draft;
       const latestDraft = cleanDraft && entryFor(STATE.transcript, cleanDraft.entry.type === 'user/message'
@@ -592,6 +653,7 @@ if (HOST && HOST.shadowRoot === null) {
       if (valid()) {
         STATE.entries = [];
         STATE.transcript = [];
+        STATE.hidden = [];
         STATE.listed = false;
         if (!STATE.draft) clearList();
         sub.textContent = '';
@@ -616,6 +678,8 @@ if (HOST && HOST.shadowRoot === null) {
   // The prefix is the definition-name LENGTH, not render order or log position.
   const FLOW_SELECTOR = '[data-chat-flow] > [data-chat-flow-key]';
   const PENCIL_ATTR = 'data-ctxkit-pencil';
+  const DELETE_ACTION_ATTR = 'data-ctxkit-delete';
+  const HIDDEN_TURN_ATTR = 'data-ctxkit-deleted-turn';
   // THE TEXT IS THE BUTTON. placePencil marks every region a reader may click to edit - the
   // markdown block, the Thinking element, the user bubble, or the whole message for a chooser -
   // and the document stylesheet below turns that mark into the hover affordance. The mark is one
@@ -648,21 +712,29 @@ if (HOST && HOST.shadowRoot === null) {
       // The pin contributes no chip any more, so keyboard focus has to be legible somewhere: the
       // pin and the mark are siblings inside one wrapper, so a focused pin paints the same glow on
       // the block it belongs to. Paint-only, exactly like the pointer glow above.
-      ':has(> [' + PENCIL_ATTR + ']:focus-within) > [' + EDIT_ATTR + '] { outline: 2px solid var(--studio-accent, var(--dsw-alias-brand-primary, #4d6bfe)); outline-offset: 2px; border-radius: 8px; box-shadow: 0 0 14px 3px color-mix(in srgb, var(--studio-accent, var(--dsw-alias-brand-primary, #4d6bfe)) 22%, transparent); }'
+      ':has(> [' + PENCIL_ATTR + ']:focus-within) > [' + EDIT_ATTR + '] { outline: 2px solid var(--studio-accent, var(--dsw-alias-brand-primary, #4d6bfe)); outline-offset: 2px; border-radius: 8px; box-shadow: 0 0 14px 3px color-mix(in srgb, var(--studio-accent, var(--dsw-alias-brand-primary, #4d6bfe)) 22%, transparent); }',
+      '[' + HIDDEN_TURN_ATTR + '] { display: none !important; }'
     ].join('\\n');
     document.head.append(affordance);
   };
-  const chatRows = () => [...document.querySelectorAll(FLOW_SELECTOR)].filter((node) =>
-    !node.closest('[data-trajectory-scroll]') && ['user', 'steering', 'assistant-step'].includes(node.getAttribute('data-chat-flow-kind')));
+  const flowRows = () => [...document.querySelectorAll(FLOW_SELECTOR)].filter((node) => !node.closest('[data-trajectory-scroll]'));
+  const chatRows = () => flowRows().filter((node) =>
+    ['user', 'steering', 'assistant-step'].includes(node.getAttribute('data-chat-flow-kind')));
   const running = (node) => !!(node.closest('[data-streaming]:not([data-streaming="false"]), [data-state="running"]')
     || node.querySelector('[data-streaming]:not([data-streaming="false"]), [data-state="running"], [data-pending-steering], [data-submission-echo]'));
+  const STOP_GENERATION = 'Generation is running. Stop generation before editing or deleting history.';
+  const generationRunning = () => chatRows().some(running);
   const flowBody = (node) => {
-    return String(node.getAttribute('data-chat-flow-key') || '').replace(/^[0-9]+:/u, '');
+    return String(node.getAttribute('data-chat-node-key') || node.getAttribute('data-chat-flow-key') || '').replace(/^[0-9]+:/u, '');
   };
   const messageIdOf = (node) => {
     const body = flowBody(node);
     const prefix = ['input-message', 'steering-message'].find((value) => body.startsWith(value));
     return prefix ? body.slice(prefix.length) : '';
+  };
+  const turnOf = (node) => {
+    const value = node.getAttribute('data-chat-turn');
+    return typeof value === 'string' && /^[0-9]+$/u.test(value) ? Number(value) : undefined;
   };
   const stepPrefix = 'assistant-step';
   const stepOf = (node) => {
@@ -838,6 +910,7 @@ if (HOST && HOST.shadowRoot === null) {
     // button's keyboard activation. A click inside a message is the shell's business (selection,
     // folding), so only the button path stops it from travelling.
     const open = (at) => {
+      if (generationRunning()) { say(STOP_GENERATION, 'err'); return; }
       // WHAT THIS PANEL KNOWS, and nothing more. The row could not be matched to a message
       // the editor can see, and that is the whole fact: the words below used to assert that
       // the message "may have been compacted", which was shown for rows that were never
@@ -881,6 +954,10 @@ if (HOST && HOST.shadowRoot === null) {
     const id = messageIdOf(node);
     return id === '' ? undefined : id;
   };
+  const deletedTurnsOf = (entries) => new Set(entries.filter((entry) => entry?.deletedTurn === true)
+    .map((entry) => entry.turn).filter(Number.isInteger));
+  const deletedEntryFor = (entries, turns, node) => entryFor(entries, targetOf(node))
+    || (turns.has(turnOf(node)) ? { turn: turnOf(node) } : undefined);
 
   // Signed thinking is excluded. Missing targets retain the shipped implicit target.
   const pinTargets = (entry) => {
@@ -938,6 +1015,44 @@ if (HOST && HOST.shadowRoot === null) {
       ? [part] : [...part.children].filter((child) => child.matches('[data-variant="think"]'))) : [];
     return { targets, texts, thoughts, containers, thinks };
   };
+  const userActionStrip = (node, entry) => {
+    if (entry?.type !== 'user/message') return null;
+    const { containers } = textLayout(node, entry);
+    const user = containers[0]?.closest('[class]')?.parentElement?.parentElement;
+    return user ? [...user.children].find((part) => hasToken(part, 'actions') && part.querySelector('button')) || null : null;
+  };
+
+  const placeDeleteAction = (node, entry) => {
+    let host = node.querySelector('[' + DELETE_ACTION_ATTR + ']');
+    if (!canDeleteTurn(entry)) { host?.remove(); return; }
+    const key = String(entry.seq);
+    if (host?.getAttribute(DELETE_ACTION_ATTR) === key && host.isConnected) return;
+    host?.remove();
+    host = document.createElement('span');
+    host.setAttribute(DELETE_ACTION_ATTR, key);
+    const actionRoot = host.attachShadow({ mode: 'open' });
+    const style = document.createElement('style');
+    style.textContent = ':host{display:inline-flex;align-items:center;color:inherit}'
+      + 'button{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;min-height:28px;padding:3px 8px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-critical,#b45f52);font:12px/1.4 var(--dsw-font-family,ui-sans-serif),system-ui,sans-serif;cursor:pointer}'
+      + 'button:hover{background:var(--studio-hover,#e6eaf0)}button:focus-visible{outline:2px solid var(--studio-accent,#8caaff);outline-offset:2px}button:disabled{opacity:.5;cursor:default}'
+      + '@media(pointer:coarse){button{min-width:44px;min-height:44px}}';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'Delete turn';
+    button.setAttribute('aria-label', 'Delete this user turn');
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      requestTurnDeletion(entry, button);
+    });
+    actionRoot.append(style, button);
+    const strip = userActionStrip(node, entry);
+    const { containers } = textLayout(node, entry);
+    if (strip) strip.append(host);
+    else if (containers[0]) containers[0].after(host);
+    else node.append(host);
+  };
+
   /**
    * Anchor the pin, and mark the regions a reader may click to edit.
    *
@@ -954,9 +1069,7 @@ if (HOST && HOST.shadowRoot === null) {
     const source = entry.type === 'user/message' ? containers[0]
       : containers.length === texts.length ? containers[texts.findIndex((item) => item.at === target.at)] : null;
     const projected = [...(projections.get(node)?.values() || [])].find((record) => record.source === source && !record.inPlace);
-    const user = source?.closest('[class]')?.parentElement?.parentElement;
-    const actions = entry.type === 'user/message' && user
-      ? [...user.children].find((part) => hasToken(part, 'actions') && part.querySelector('button')) : null;
+    const actions = userActionStrip(node, entry);
     const anchor = actions || think || projected?.host || source || node;
     if (pin.anchor === anchor && pin.isConnected) return;
     pin.cleanup?.(); pin.style.cssText = ''; pin.anchor = anchor;
@@ -1129,6 +1242,23 @@ if (HOST && HOST.shadowRoot === null) {
   const pinnedRows = new Set();
   const unavailableRows = new Map();
   const rowOwners = new WeakMap();
+  const hiddenRows = new WeakSet();
+  const setDeletedVisibility = (node, hidden) => {
+    if (hidden) {
+      if (!node.hasAttribute(HIDDEN_TURN_ATTR)) {
+        node.setAttribute(HIDDEN_TURN_ATTR, '');
+        hiddenRows.add(node);
+      }
+      return;
+    }
+    if (hiddenRows.has(node)) {
+      node.removeAttribute(HIDDEN_TURN_ATTR);
+      hiddenRows.delete(node);
+    }
+  };
+  const restoreDeletedVisibility = () => {
+    for (const node of document.querySelectorAll('[' + HIDDEN_TURN_ATTR + ']')) setDeletedVisibility(node, false);
+  };
   const decorateTranscript = () => {
     const draft = STATE.draft;
     if (draft?.inline && (!draft.inline.host.isConnected || !draft.inline.source.isConnected
@@ -1148,35 +1278,52 @@ if (HOST && HOST.shadowRoot === null) {
       draft.area.focus();
       say('The Chat block moved. Your draft is kept here; saving still checks the original target.', 'err');
     }
-    const rows = chatRows().filter((node) => {
+    installAffordance();
+    const ownedRows = flowRows().filter((node) => {
       if (STATE.sessionId === '') return false;
       if (!rowOwners.has(node)) rowOwners.set(node, STATE.sessionId);
       return rowOwners.get(node) === STATE.sessionId;
     });
+    const rows = ownedRows.filter((node) =>
+      ['user', 'steering', 'assistant-step'].includes(node.getAttribute('data-chat-flow-kind')));
+    const hiddenTurns = deletedTurnsOf(STATE.hidden);
+    const hiddenFor = (node) => deletedEntryFor(STATE.hidden, hiddenTurns, node);
+    for (const node of ownedRows) setDeletedVisibility(node, !!hiddenFor(node));
+    for (const host of document.querySelectorAll('[' + DELETE_ACTION_ATTR + ']')) {
+      if (!rows.includes(host.closest(FLOW_SELECTOR))) host.remove();
+    }
     for (const [node, pin] of unavailableRows) {
-      if (rows.includes(node) && !running(node) && STATE.listed && !pinTargets(entryFor(STATE.transcript, targetOf(node)) || {}).length) continue;
+      if (rows.includes(node) && !hiddenFor(node) && STATE.listed
+        && !pinTargets(entryFor(STATE.transcript, targetOf(node)) || {}).length) continue;
       pin.remove(); unavailableRows.delete(node);
     }
     for (const [node, records] of projections) {
-      if (rows.includes(node) && !running(node)) continue;
+      if (rows.includes(node) && !running(node) && !hiddenFor(node)) continue;
       for (const record of records.values()) restoreProjection(record);
       projections.delete(node);
     }
     for (const node of pinnedRows) {
-      if (rows.includes(node) && !running(node) && entryFor(STATE.transcript, targetOf(node))) continue;
+      if (rows.includes(node) && !hiddenFor(node) && entryFor(STATE.transcript, targetOf(node))) continue;
       for (const pin of node.querySelectorAll('[' + PENCIL_ATTR + ']')) { pin.cleanup?.(); pin.remove(); }
       pinnedRows.delete(node);
     }
     for (const node of rows) {
-      const entry = running(node) ? undefined : entryFor(STATE.transcript, targetOf(node));
-      projectRow(node, entry);
+      const identity = targetOf(node);
+      const hidden = hiddenFor(node);
+      const entry = entryFor(STATE.transcript, identity);
+      if (hidden) {
+        node.querySelector('[' + DELETE_ACTION_ATTR + ']')?.remove();
+        continue;
+      }
+      projectRow(node, running(node) ? undefined : entry);
+      placeDeleteAction(node, entry);
       if (STATE.draft?.inline?.node === node) continue;
       // ONE PENCIL PER EDITABLE TARGET: a reply of [reasoning, text] gets two - the
       // answer and the thinking - a message with one target gets one, and a message that
       // offers none gets none. The markers are read back off the row itself, so a
       // re-decoration adds nothing and a pencil whose target is gone is removed.
       const offers = entry === undefined ? [] : pinTargets(entry);
-      if (!offers.length && STATE.listed && !running(node) && ['user', 'steering'].includes(node.getAttribute('data-chat-flow-kind'))) {
+      if (!offers.length && STATE.listed && ['user', 'steering'].includes(node.getAttribute('data-chat-flow-kind'))) {
         const unavailable = { label: 'Message', kind: 'text', unavailable: true, reason: entry?.reason };
         const fallback = entry || { type: 'user/message' };
         let pin = unavailableRows.get(node);
@@ -1219,8 +1366,9 @@ if (HOST && HOST.shadowRoot === null) {
     if (found === STATE.sessionId) return;
     // Retained rows still belong to the departing session, even before their first decoration.
     if (STATE.sessionId !== '') {
-      for (const node of chatRows()) if (!rowOwners.has(node)) rowOwners.set(node, STATE.sessionId);
+      for (const node of flowRows()) if (!rowOwners.has(node)) rowOwners.set(node, STATE.sessionId);
     }
+    restoreDeletedVisibility();
     const draft = STATE.draft;
     settleConfirmation();
     if (draft && draft.area.value !== draft.target.text) {
@@ -1235,6 +1383,7 @@ if (HOST && HOST.shadowRoot === null) {
     STATE.pending = null;
     STATE.entries = [];
     STATE.transcript = [];
+    STATE.hidden = [];
     STATE.listed = false;
     clearList();
     sub.textContent = '';
@@ -1266,7 +1415,7 @@ if (HOST && HOST.shadowRoot === null) {
   };
   // Attribute changes catch recycled identities and streaming completion. Ignore our
   // own insertions; shadow mutations never cross this observer boundary.
-  const owned = (node) => node.nodeType === 1 && (node.hasAttribute(PENCIL_ATTR) || node.hasAttribute('data-ctxkit-unavailable') || node.hasAttribute('data-ctxkit-surface') || node.hasAttribute('data-ctxkit-projection') || node.hasAttribute('data-ctxkit-inline'));
+  const owned = (node) => node.nodeType === 1 && (node.hasAttribute(PENCIL_ATTR) || node.hasAttribute(DELETE_ACTION_ATTR) || node.hasAttribute('data-ctxkit-unavailable') || node.hasAttribute('data-ctxkit-surface') || node.hasAttribute('data-ctxkit-projection') || node.hasAttribute('data-ctxkit-inline'));
   new MutationObserver((records) => {
     if (records.some((record) => record.type !== 'childList' || record.removedNodes.length > 0
       || [...record.addedNodes, ...record.removedNodes].some((node) => !owned(node)))) schedule();

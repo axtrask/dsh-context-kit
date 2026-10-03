@@ -732,6 +732,39 @@ const syntheticPlan = edit.planWireRewrite(syntheticHistory, syntheticStore.edit
 check('synthetic user-role continuations stay inside the deleted human turn',
   syntheticPlan.messages.map((message) => message.id).join(',') === 'direct-2');
 
+const durableEditedHistory = turnMessages.map((message) => message.id === 'u1'
+  ? { ...message, content: [text('First question, edited')], source: { kind: 'plugin:context-kit-editor' } }
+  : message);
+const durableEditedStore = edit.createEditStore({ restore: false });
+const durableEditedDelete = durableEditedStore.deleteTurn('delete-durable-user', durableEditedHistory, {
+  messageIndex: 1, messageId: 'u1', expected: 'First question, edited'
+});
+const durableEditedPlan = edit.planWireRewrite(durableEditedHistory, durableEditedStore.editsFor('delete-durable-user'));
+check('a durably edited human message remains a turn-deletion boundary', durableEditedDelete.ok === true
+  && durableEditedPlan.messages.map((message) => message.id).join(',') === 'sys,u2,a2,u3');
+
+const durableBoundaryHistory = turnMessages.map((message) => message.id === 'u1'
+  ? { ...message, content: [text('First question, edited')], source: { kind: 'plugin:context-kit-editor' } }
+  : message.id === 'u2'
+    ? { ...message, content: [text('Second question, edited')], source: { kind: 'plugin:edit' } }
+    : message);
+const durableBoundaryStore = edit.createEditStore({ restore: false });
+const durableBoundaryDelete = durableBoundaryStore.deleteTurn('delete-durable-boundaries', durableBoundaryHistory, {
+  messageIndex: 1, messageId: 'u1', expected: 'First question, edited'
+});
+const durableBoundaryProblems = [];
+const restoredBoundaryStore = edit.createEditStore({
+  onProblem: (_sessionId, problem) => durableBoundaryProblems.push(problem)
+});
+const restoredBoundaryEdits = restoredBoundaryStore.editsFor('delete-durable-boundaries');
+const restoredBoundaryPlan = edit.planWireRewrite(durableBoundaryHistory, restoredBoundaryEdits);
+check('edited anchor and next-boundary provenance survives save, reload, and replan',
+  durableBoundaryDelete.ok === true
+    && durableBoundaryProblems.length === 0
+    && restoredBoundaryEdits.length === 1
+    && restoredBoundaryPlan.messages.map((message) => message.id).join(',') === 'sys,u2,a2,u3',
+  JSON.stringify({ problems: durableBoundaryProblems, edits: restoredBoundaryEdits, plan: restoredBoundaryPlan }));
+
 const changedMembers = [...finalHistory];
 changedMembers.splice(8, 0, assistantMessage('inserted', text('Unexpected insertion')));
 const changedMemberPlan = edit.planWireRewrite(changedMembers, finalStore.editsFor('delete-final-stable'));

@@ -114,6 +114,7 @@ async function mountPlugin(rowConfig) {
   const { context, runtime, calls } = makeRoot();
   const infos = [];
   const warnings = [];
+  const errors = [];
   // The logger is SHADOWED, not provided. `context.provide('logger', ...)` does not
   // work here: cordis installs a `LoggerService` as an own property of every root
   // (`cordis/lib/index.js:1687`), `provide` does not replace it, and every captured
@@ -122,6 +123,7 @@ async function mountPlugin(rowConfig) {
   // actually intercepts `ctx.logger.info`.
   context.logger.info = (...args) => infos.push(args.map((arg) => (arg instanceof Error ? arg.message : String(arg))).join(' '));
   context.logger.warn = (...args) => warnings.push(args.map((arg) => (arg instanceof Error ? arg.message : String(arg))).join(' '));
+  context.logger.error = (...args) => errors.push(args.map((arg) => (arg instanceof Error ? `${arg.message}\n${arg.stack}` : String(arg))).join(' '));
   context.provide('tools', { register: () => () => {} });
   context.provide('tokenMeter', {
     estimateMessage: (message) => JSON.stringify(message?.content ?? message ?? '').length,
@@ -129,8 +131,8 @@ async function mountPlugin(rowConfig) {
   });
   const store = new SessionStore(context);
   const fiber = context.plugin(dcp, rowConfig);
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  return { context, runtime, calls, store, fiber, infos, warnings };
+  await fiber.await;
+  return { context, runtime, calls, store, fiber, infos, warnings, errors };
 }
 
 /**
@@ -175,7 +177,7 @@ async function fixture(store, id, replyBlocks = [text('REPLY-ORIGINAL')], userBl
 
 console.log('--- the plugin mounts the overlay by itself ---');
 
-const { context, runtime, calls, store, infos, warnings, fiber } = await mountPlugin({ editor: { enabled: true, requireIdle: false } });
+const { context, runtime, calls, store, infos, warnings, errors, fiber } = await mountPlugin({ editor: { enabled: true, requireIdle: false } });
 const session = await fixture(store, 'edit-wire-live');
 const sessionId = String(session.id);
 
@@ -187,7 +189,8 @@ check(
 // THE CHECK THAT WOULD HAVE CAUGHT THE DEAD OVERLAY. It was written, unit-tested and
 // never mounted; the registry is where a mount is visible and code review is not.
 const mountedListeners = listenerCount(context, 'llm/stream');
-check('apply mounted a listener on llm/stream', mountedListeners >= 1, `listeners=${mountedListeners}`);
+check('apply mounted a listener on llm/stream', mountedListeners >= 1,
+  `listeners=${mountedListeners}${errors.length === 0 ? '' : `, errors=${errors.join(' | ')}`}`);
 check('the plugin published a wire store for the panel', bridge.publishedStores() === 1, String(bridge.publishedStores()));
 const wireStore = bridge.editStoreFor(sessionId);
 check('the store is reachable by session id, which is how the panel finds it', wireStore !== undefined, wireStore === undefined ? 'no store published' : 'store found');

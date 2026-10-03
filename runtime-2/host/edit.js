@@ -634,8 +634,21 @@ function validateDeletionSlice(messages, edit, start) {
   return closure === undefined ? { end } : { reason: closure };
 }
 
+const DIRECT_HUMAN_SOURCE_KINDS = new Set(['user', 'plugin:edit', 'plugin:context-kit-editor']);
+
+function directHumanSource(kind) {
+  return DIRECT_HUMAN_SOURCE_KINDS.has(kind);
+}
+
 function startsHumanTurn(message) {
-  return message?.role === 'user' && message?.source?.kind === 'user';
+  // Durable user edits replace the original surface node with a message owned by
+  // this editor. They remain human turn boundaries: both source kinds are reserved
+  // for single-source replacements whose ancestry is verified by edit-durable.js.
+  return message?.role === 'user' && directHumanSource(message?.source?.kind);
+}
+
+function snapshotStartsHumanTurn(snapshot) {
+  return snapshot?.role === 'user' && directHumanSource(snapshot?.sourceKind);
 }
 
 /**
@@ -940,10 +953,10 @@ function describeMalformedEdit(edit) {
     if (edit.next !== null) {
       const problem = malformedDeletionSnapshot(edit.next, 'next turn boundary');
       if (problem !== undefined) return problem;
-      if (edit.next.role !== 'user' || edit.next.sourceKind !== 'user') return 'next turn boundary is not a direct user message';
+      if (!snapshotStartsHumanTurn(edit.next)) return 'next turn boundary is not a direct user message';
       if (ids.has(String(edit.next.id))) return 'next turn boundary duplicates a member id';
     }
-    if (edit.members[0].role !== 'user' || edit.members[0].sourceKind !== 'user') {
+    if (!snapshotStartsHumanTurn(edit.members[0])) {
       return 'first turn member is not a direct user message';
     }
     return undefined;
