@@ -507,6 +507,16 @@ try {
   check('preserved summaries do not leak nested presentation labels', !blockOnlyText.includes('Block b1 — Topic:') && !blockOnlyText.includes('(b1) block'), blockOnlyText);
   check('preserved lineage is complete', JSON.stringify(blockOnlyValue.blocks[0].childBlockIds) === '["1"]' && JSON.stringify(blockOnlyValue.blocks[0].preservedBlockIds) === '["1"]' && JSON.stringify(blockOnlyValue.blocks[0].absorbedBlockIds) === '[]');
 
+  const adjacentBlocks = fixture();
+  await compressRange(standard, adjacentBlocks, adjacentBlocks.user, adjacentBlocks.user, 'ADJACENT-FIRST');
+  const adjacentAssistant = ref(standard.engine, adjacentBlocks.session, adjacentBlocks.assistant);
+  await compressRange(standard, adjacentBlocks, adjacentAssistant, adjacentAssistant, 'ADJACENT-SECOND');
+  const adjacentValue = await compressRange(standard, adjacentBlocks, 'b1', 'b2', 'ADJACENT-MERGED', 'Merged old summaries');
+  const adjacentText = modelText(adjacentBlocks.session);
+  check('a range made only of adjacent compressed blocks can be compressed', adjacentValue.compressed === true && adjacentValue.absorbedBlocks === 2, JSON.stringify(adjacentValue));
+  check('block-only recompression absorbs both predecessors', adjacentText.includes('ADJACENT-MERGED') && !adjacentText.includes('ADJACENT-FIRST') && !adjacentText.includes('ADJACENT-SECOND'), adjacentText);
+  check('block-only recompression records both predecessor ids', JSON.stringify(adjacentValue.blocks[0].childBlockIds) === '["1","2"]' && JSON.stringify(adjacentValue.blocks[0].absorbedBlockIds) === '["1","2"]', JSON.stringify(adjacentValue.blocks[0]));
+
   console.log('\n--- strict canonical placeholder semantics ---');
   const lateRow = fixture();
   const lateUser = ref(standard.engine, lateRow.session, lateRow.user);

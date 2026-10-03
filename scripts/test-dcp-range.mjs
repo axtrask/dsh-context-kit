@@ -199,7 +199,7 @@ console.log('\n--- replacement ids follow surface order, not numeric order ---')
   const range = engine.balancedRange(reordered, 4, 3);
   check('a newly minted block can begin a range ending at an older seq', range !== undefined && range.startIdx === 2 && range.endIdx === 4, JSON.stringify(range));
   check('a backwards surface range is refused', engine.balancedRange(reordered, 3, 4) === undefined);
-  check('a block-only range is refused without grabbing its neighbors', engine.balancedRange(reordered, 4, 4) === undefined);
+  check('a one-node range needs single-node mode', engine.balancedRange(reordered, 4, 4) === undefined);
   const adjacent = engine.balancedRange(reordered, 2, 3);
   check('an adjacent outside block is not absorbed', adjacent !== undefined && adjacent.startIdx === 3 && adjacent.endIdx === 4 && adjacent.boundaryBlockIds.length === 0, JSON.stringify(adjacent));
   const single = engine.balancedRange(reordered, 2, 2, { singleNode: true });
@@ -211,7 +211,8 @@ console.log('\n--- replacement ids follow surface order, not numeric order ---')
   check('one fresh node between two blocks is compressible', range !== undefined && range.startIdx === 2 && range.endIdx === 4, JSON.stringify(range));
   check('both selected boundary blocks are reported', JSON.stringify(range?.boundaryBlockIds) === '[7,8]', JSON.stringify(range?.boundaryBlockIds));
   const onlyBlocks = fakeSession(both.surface.nodes.map((seq) => both.eventAt(seq)), [0, 1, 2, 4]);
-  check('a range containing only blocks is refused', engine.balancedRange(onlyBlocks, 2, 4) === undefined);
+  const blockRange = engine.balancedRange(onlyBlocks, 2, 4);
+  check('a range containing only blocks is accepted', blockRange !== undefined && blockRange.startIdx === 2 && blockRange.endIdx === 3 && JSON.stringify(blockRange.boundaryBlockIds) === '[7,8]', JSON.stringify(blockRange));
 }
 
 console.log(`\n${failures.length === 0 ? 'all DCP range tests passed' : `${failures.length} failure(s)`}`);

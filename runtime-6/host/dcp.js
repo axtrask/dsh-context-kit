@@ -2086,22 +2086,18 @@ export class DcpCompactionEngine extends BasicCompactionEngine {
     // tell a pruning notice from a compression — and a notice on the surface would then
     // have been treated as compressible content.
     // Like upstream's resolveSelection, collect only blocks within the selected
-    // span, including its edges. At least one non-block node must be present.
+    // span, including its edges. A span may consist entirely of existing blocks:
+    // re-compressing them is how several older summaries are merged or absorbed.
     const innerBlockIds = [];
     const boundaryBlockIds = [];
-    let hasFresh = false;
     for (let index = from; index <= to; index += 1) {
       const block = this.blockAtSeq(session, nodes[index], state);
-      if (block === undefined) {
-        hasFresh = true;
-        continue;
-      }
+      if (block === undefined) continue;
       const id = numericBlockId(block.blockId);
       if (id === undefined) continue;
       const ids = index === from || index === to ? boundaryBlockIds : innerBlockIds;
       if (!ids.includes(id)) ids.push(id);
     }
-    if (!hasFresh && !single) return undefined;
     // State-only ownership must agree for hints and execution. Addresses can be
     // reordered by replacements, so only membership proves complete coverage.
     if (!single) {
