@@ -451,13 +451,13 @@ ok('Chat CSS tokens match only the two complete module naming formats', () => {
   }
 });
 
-ok('the four methods the browser may call are the four the channel answers', () => {
+ok('the five methods the browser may call are the five the channel answers', () => {
   const source = readFileSync(join(ROOT, 'lib', 'edit-gui.js'), 'utf8');
   for (const method of Object.values(EDIT_METHODS)) {
     assert.ok(source.includes(`'${method}'`), `${method} is not named in the module`);
     assert.ok(injectEditor(PAGE).includes(`'${method}'`), `${method} is never called by the panel`);
   }
-  assert.deepEqual(Object.keys(EDIT_METHODS).sort(), ['commit', 'deleteTurn', 'list', 'status']);
+  assert.deepEqual(Object.keys(EDIT_METHODS).sort(), ['commit', 'deleteMessage', 'deleteTurn', 'list', 'status']);
 });
 
 ok('the panel refuses nothing silently: refusals are shown as text', () => {
@@ -826,9 +826,10 @@ ok('a reply row is named by the turn and the step, because it carries no id', ()
   }
 });
 
-ok('turn deletion is offered only for a direct human message', () => {
-  const { canDeleteTurn } = panelConsts(injectEditor(PAGE), ['canDeleteTurn']);
+ok('each deletion kind is offered only for its own message role', () => {
+  const { canDeleteTurn, canDeleteMessage } = panelConsts(injectEditor(PAGE), ['canDeleteTurn', 'canDeleteMessage']);
   assert.equal(canDeleteTurn({ type: 'user/message', directUser: true }), true);
+  assert.equal(canDeleteMessage({ type: 'assistant/message' }), true);
   for (const entry of [
     { type: 'user/message', directUser: false },
     { type: 'user/message' },
@@ -836,6 +837,11 @@ ok('turn deletion is offered only for a direct human message', () => {
     { type: 'tool/result', directUser: true },
     undefined
   ]) assert.equal(canDeleteTurn(entry), false, JSON.stringify(entry));
+  for (const entry of [
+    { type: 'user/message', directUser: true },
+    { type: 'tool/result' },
+    undefined
+  ]) assert.equal(canDeleteMessage(entry), false, JSON.stringify(entry));
 });
 
 ok('grouped seats use their canonical reply key and deleted turns include auxiliary flow rows', () => {
@@ -873,6 +879,60 @@ ok('grouped seats use their canonical reply key and deleted turns include auxili
   assert.equal(deletedEntryFor([{ type: 'user/message', originId: 'u1', deletedTurn: true }], new Set(),
     row({ 'data-chat-flow-kind': 'user', 'data-chat-flow-key': '13:input-messageu1' }))?.originId, 'u1',
   'a deleted user-only turn must still match by origin id when the Host marks it deleted');
+
+  const partial = [{ type: 'assistant/message', turn: 8, step: 2, id: 'reply-8', deletedMessage: true, deletedTurn: false }];
+  const partialTurns = deletedTurnsOf(partial);
+  assert.deepEqual([...partialTurns], [], 'one assistant tombstone was promoted to a complete deleted turn');
+  assert.equal(deletedEntryFor(partial, partialTurns, grouped)?.id, 'reply-8',
+    'the exact deleted assistant seat stayed visible');
+  assert.equal(deletedEntryFor(partial, partialTurns, row({
+    'data-chat-flow-kind': 'assistant-step', 'data-chat-node-key': '14:assistant-step8:1', 'data-chat-turn': '8'
+  })), undefined, 'a sibling assistant step was hidden with the exact deleted message');
+  assert.equal(deletedEntryFor(partial, partialTurns,
+    row({ 'data-chat-flow-key': '12:turn-process8', 'data-chat-turn': '8' })), undefined,
+  'a partial assistant deletion hid the whole grouped process');
+});
+
+ok('the decorator hides only the exact assistant row for a delete-message tombstone', () => {
+  const exact = fakeElement('article');
+  exact.setAttribute('data-chat-flow-kind', 'assistant-step');
+  exact.setAttribute('data-chat-node-key', '14:assistant-step8:2');
+  exact.setAttribute('data-chat-flow-key', '["14:assistant-step8:2","reasoning"]');
+  exact.setAttribute('data-chat-turn', '8');
+  const sibling = fakeElement('article');
+  sibling.setAttribute('data-chat-flow-kind', 'assistant-step');
+  sibling.setAttribute('data-chat-node-key', '14:assistant-step8:1');
+  sibling.setAttribute('data-chat-flow-key', '14:assistant-step8:1');
+  sibling.setAttribute('data-chat-turn', '8');
+  const process = fakeElement('article');
+  process.setAttribute('data-chat-flow-key', '12:turn-process8');
+  process.setAttribute('data-chat-turn', '8');
+  const rows = [exact, sibling, process];
+  globalThis.__ctxkitHiddenDocument = {
+    querySelectorAll: (selector) => selector === '[data-chat-flow] > [data-chat-flow-key]' ? rows : []
+  };
+  const { STATE, HIDDEN_TURN_ATTR, decorateTranscript } = panelConsts(injectEditor(PAGE), [
+    'STATE', 'FLOW_SELECTOR', 'HIDDEN_TURN_ATTR', 'flowBody', 'messageIdOf', 'turnOf', 'stepPrefix', 'stepOf',
+    'entryFor', 'targetOf', 'deletedTurnsOf', 'deletedEntryFor', 'projections', 'pinnedRows', 'unavailableRows',
+    'rowOwners', 'hiddenRows', 'setDeletedVisibility', 'decorateTranscript'
+  ], [
+    'const document = globalThis.__ctxkitHiddenDocument;',
+    'const flowRows = () => [...document.querySelectorAll(FLOW_SELECTOR)];',
+    'const running = () => false; const installAffordance = () => {};',
+    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const PENCIL_ATTR = "data-ctxkit-pencil";',
+    'const projectRow = () => {}; const placeDeleteAction = () => {};'
+  ].join('\n'));
+  STATE.sessionId = 'test-session';
+  STATE.hidden = [{ type: 'assistant/message', turn: 8, step: 2, id: 'reply-8', deletedMessage: true, deletedTurn: false }];
+  STATE.transcript = [];
+  decorateTranscript();
+  assert.equal(exact.hasAttribute(HIDDEN_TURN_ATTR), true, 'the exact deleted assistant row stayed visible');
+  assert.equal(sibling.hasAttribute(HIDDEN_TURN_ATTR), false, 'a sibling assistant row was hidden');
+  assert.equal(process.hasAttribute(HIDDEN_TURN_ATTR), false, 'the grouped process row was hidden');
+  STATE.hidden = [];
+  decorateTranscript();
+  assert.equal(exact.hasAttribute(HIDDEN_TURN_ATTR), false, 'clearing Host metadata did not restore the row');
+  delete globalThis.__ctxkitHiddenDocument;
 });
 
 ok('deleted-row markers are reversible without touching native visibility or DOM ownership', () => {
@@ -905,16 +965,60 @@ ok('deleted-row markers are reversible without touching native visibility or DOM
   assert.equal(native.getAttribute(HIDDEN_TURN_ATTR), 'native', 'a pre-existing native marker was clobbered');
 });
 
+ok('nested editable regions paint one deepest hover outline and share their mark safely', () => {
+  const head = fakeElement('head');
+  head.querySelector = (selector) => head.children.find((child) => child.tagName === 'STYLE'
+    && selector === 'style[data-ctxkit-affordance]' && child.hasAttribute('data-ctxkit-affordance')) || null;
+  globalThis.__ctxkitAffordanceDocument = { head, createElement: (tag) => fakeElement(tag) };
+  const { EDIT_ATTR, AFFORDANCE_ATTR, installAffordance, markRegion, unmarkRegion, pinAt } = panelConsts(injectEditor(PAGE), [
+    'PENCIL_ATTR', 'HIDDEN_TURN_ATTR', 'EDIT_ATTR', 'AFFORDANCE_ATTR', 'installAffordance',
+    'regionOwners', 'markRegion', 'unmarkRegion', 'pinAt'
+  ], 'const document = globalThis.__ctxkitAffordanceDocument;');
+  installAffordance();
+  installAffordance();
+  const styles = globalThis.__ctxkitAffordanceDocument.head.children
+    .filter((child) => child.getAttribute(AFFORDANCE_ATTR) !== null);
+  assert.equal(styles.length, 1, 'the hover stylesheet was installed twice');
+  const hover = styles[0].textContent.split('\n')[0];
+  assert.match(hover, /^\[data-ctxkit-edit\]:hover:not\(:has\(\[data-ctxkit-edit\]:hover\)\)/u,
+    'an outer marked wrapper can still paint behind its hovered child');
+  assert.equal((hover.match(/outline:/gu) || []).length, 1, 'the hover winner paints more than one outline');
+  assert.doesNotMatch(hover, /box-shadow/u, 'the removed hover glow came back');
+  assert.doesNotMatch(styles[0].textContent, /\[data-ctxkit-edit\]:hover\s*\{/u,
+    'a generic parent hover painter bypasses the deepest-only rule');
+
+  const shared = fakeElement('div');
+  markRegion(shared);
+  markRegion(shared);
+  assert.equal(shared.hasAttribute(EDIT_ATTR), true);
+  unmarkRegion(shared);
+  assert.equal(shared.hasAttribute(EDIT_ATTR), true, 'one owner removed another target\'s shared hover region');
+  unmarkRegion(shared);
+  assert.equal(shared.hasAttribute(EDIT_ATTR), false, 'the final owner did not clean up its hover region');
+
+  const leaf = {};
+  const outer = { contains: (candidate) => candidate === outer || candidate === inner || candidate === leaf };
+  const inner = { contains: (candidate) => candidate === inner || candidate === leaf };
+  const outerPin = { regions: [outer] };
+  const innerPin = { regions: [inner] };
+  for (const pins of [[outerPin, innerPin], [innerPin, outerPin]]) {
+    assert.equal(pinAt({ querySelectorAll: () => pins }, leaf), innerPin,
+      'the innermost editable region did not win independently of pin order');
+  }
+  delete globalThis.__ctxkitAffordanceDocument;
+});
+
 ok('re-decoration keeps exactly one delete action on a direct human row', () => {
   globalThis.__ctxkitDeleteDocument = { createElement: (tag) => fakeElement(tag) };
   const { placeDeleteAction } = panelConsts(injectEditor(PAGE), [
-    'canDeleteTurn', 'placeDeleteAction'
+    'canDeleteTurn', 'canDeleteMessage', 'placeDeleteAction'
   ], [
     'const document = globalThis.__ctxkitDeleteDocument;',
     'const DELETE_ACTION_ATTR = "data-ctxkit-delete";',
     'const requestTurnDeletion = () => {};',
+    'const requestMessageDeletion = () => {};',
     'const userActionStrip = (node) => node;',
-    'const textLayout = () => ({ containers: [] });'
+    'const textLayout = () => ({ containers: [], thinks: [] });'
   ].join('\n'));
   const row = fakeElement('article');
   const entry = { type: 'user/message', directUser: true, seq: 17 };
@@ -923,6 +1027,38 @@ ok('re-decoration keeps exactly one delete action on a direct human row', () => 
   placeDeleteAction(row, entry);
   assert.equal(row.querySelectorAll('[data-ctxkit-delete]').length, 1, 'a second decoration duplicated Delete turn');
   assert.equal(row.querySelector('[data-ctxkit-delete]'), first, 'a stable delete action was unnecessarily replaced');
+  delete globalThis.__ctxkitDeleteDocument;
+});
+
+ok('an assistant row keeps one exact delete-message action and wires its callback', () => {
+  globalThis.__ctxkitDeleteAction = { calls: [] };
+  globalThis.__ctxkitDeleteDocument = { createElement: (tag) => fakeElement(tag) };
+  const { placeDeleteAction } = panelConsts(injectEditor(PAGE), [
+    'canDeleteTurn', 'canDeleteMessage', 'placeDeleteAction'
+  ], [
+    'const document = globalThis.__ctxkitDeleteDocument;',
+    'const DELETE_ACTION_ATTR = "data-ctxkit-delete";',
+    'const requestTurnDeletion = () => { throw Error("assistant action called deleteTurn"); };',
+    'const requestMessageDeletion = (entry, control) => globalThis.__ctxkitDeleteAction.calls.push([entry, control]);',
+    'const userActionStrip = () => null;',
+    'const textLayout = () => ({ containers: [], thinks: [] });'
+  ].join('\n'));
+  const row = fakeElement('article');
+  const entry = { type: 'assistant/message', seq: 18, id: 'reply-18', turn: 3, step: 2 };
+  placeDeleteAction(row, entry);
+  const first = row.querySelector('[data-ctxkit-delete]');
+  placeDeleteAction(row, entry);
+  assert.equal(row.querySelectorAll('[data-ctxkit-delete]').length, 1, 'a second decoration duplicated Delete message');
+  assert.equal(row.querySelector('[data-ctxkit-delete]'), first, 'a stable assistant delete action was replaced');
+  assert.equal(first.getAttribute('data-ctxkit-delete'), 'message:18');
+  const button = first.shadowRoot.children.find((child) => child.tagName === 'BUTTON');
+  assert.equal(button.textContent, 'Delete message');
+  assert.equal(button.getAttribute('aria-label'), 'Delete this assistant message');
+  button.dispatch('click');
+  assert.equal(globalThis.__ctxkitDeleteAction.calls.length, 1, 'the assistant action did not request message deletion');
+  assert.equal(globalThis.__ctxkitDeleteAction.calls[0][0], entry);
+  assert.equal(globalThis.__ctxkitDeleteAction.calls[0][1], button);
+  delete globalThis.__ctxkitDeleteAction;
   delete globalThis.__ctxkitDeleteDocument;
 });
 
@@ -971,6 +1107,43 @@ ok('turn deletion waits for confirmation, sends the exact payload, and refreshes
   assert.equal(STATE.transcript, before, 'Host refusal optimistically replaced the transcript');
   assert.match(globalThis.__ctxkitDelete.notices.at(-1)[0], /generation won the race/u);
   delete globalThis.__ctxkitDelete;
+});
+
+ok('assistant deletion waits for confirmation and sends the exact message payload', async () => {
+  globalThis.__ctxkitDeleteMessage = { running: false, confirmation: null, calls: [], loads: 0, notices: [], answer: { ok: true } };
+  const { STATE, requestMessageDeletion } = panelConsts(injectEditor(PAGE), [
+    'STATE', 'entryFor', 'canDeleteMessage', 'requestMessageDeletion'
+  ], [
+    'const syncSession = () => {};',
+    'const generationRunning = () => globalThis.__ctxkitDeleteMessage.running;',
+    'const say = (message, kind) => globalThis.__ctxkitDeleteMessage.notices.push([message, kind]);',
+    'const leaveDraft = () => true;',
+    'const askConfirmation = (title, message, action, accept, cancel) => { globalThis.__ctxkitDeleteMessage.confirmation = { title, message, action, accept, cancel }; };',
+    'const call = async (method, payload) => { globalThis.__ctxkitDeleteMessage.calls.push([method, payload]); return globalThis.__ctxkitDeleteMessage.answer; };',
+    'const isCurrent = () => true;',
+    'const load = async () => { globalThis.__ctxkitDeleteMessage.loads += 1; return true; };',
+    'const STOP_GENERATION = "Generation is running. Stop generation before editing or deleting history.";'
+  ].join('\n'));
+  const entry = { type: 'assistant/message', id: 'wire-a', seq: 18, turn: 3, step: 2, text: 'answer' };
+  STATE.sessionId = 'session-a';
+  STATE.epoch = 4;
+  STATE.transcript = [entry];
+
+  requestMessageDeletion(entry, { isConnected: true, disabled: false });
+  assert.equal(globalThis.__ctxkitDeleteMessage.confirmation.action, 'Delete message');
+  assert.deepEqual(globalThis.__ctxkitDeleteMessage.calls, [], 'opening assistant confirmation called delete');
+  await globalThis.__ctxkitDeleteMessage.confirmation.accept();
+  assert.deepEqual(globalThis.__ctxkitDeleteMessage.calls, [[EDIT_METHODS.deleteMessage, {
+    sessionId: 'session-a', seq: 18, id: 'wire-a', expected: 'answer'
+  }]]);
+  assert.equal(globalThis.__ctxkitDeleteMessage.loads, 1, 'Host success must refresh exactly once');
+
+  globalThis.__ctxkitDeleteMessage.answer = { ok: false, reason: 'stale assistant' };
+  requestMessageDeletion(entry);
+  await globalThis.__ctxkitDeleteMessage.confirmation.accept();
+  assert.equal(globalThis.__ctxkitDeleteMessage.loads, 1, 'Host refusal must not refresh or hide anything');
+  assert.match(globalThis.__ctxkitDeleteMessage.notices.at(-1)[0], /stale assistant/u);
+  delete globalThis.__ctxkitDeleteMessage;
 });
 
 ok('a rewritten row requires exact verified provenance, never an id suffix guess', () => {
@@ -1124,6 +1297,132 @@ function fakeElement(tag) {
   return element;
 }
 
+/** A linked fake DOM for display-projection checks that need native sibling identity. */
+function linkedElement(tag, classes = [], attributes = {}) {
+  const attrs = new Map(Object.entries(attributes));
+  const values = new Map();
+  const priorities = new Map();
+  const connect = (node, connected) => {
+    node.isConnected = connected;
+    for (const child of node.childNodes ?? []) connect(child, connected);
+  };
+  const detach = (node) => {
+    const parent = node.parentNode;
+    if (!parent) return;
+    const childAt = parent.childNodes.indexOf(node);
+    if (childAt >= 0) parent.childNodes.splice(childAt, 1);
+    const elementAt = parent.children.indexOf(node);
+    if (elementAt >= 0) parent.children.splice(elementAt, 1);
+    node.parentNode = null;
+    node.parentElement = null;
+    connect(node, false);
+  };
+  const element = {
+    nodeType: 1,
+    tagName: String(tag).toUpperCase(),
+    children: [],
+    childNodes: [],
+    parentNode: null,
+    parentElement: null,
+    isConnected: false,
+    classList: [...classes],
+    className: classes.join(' '),
+    attributes: attrs,
+    listeners: new Map(),
+    shadowRoot: null,
+    textContent: '',
+    type: '',
+    disabled: false,
+    style: {
+      setProperty(name, value, priority = '') { values.set(name, String(value)); priorities.set(name, String(priority)); },
+      getPropertyValue: (name) => values.get(name) ?? '',
+      getPropertyPriority: (name) => priorities.get(name) ?? '',
+      removeProperty(name) { values.delete(name); priorities.delete(name); }
+    },
+    setAttribute(name, value) { attrs.set(name, String(value)); },
+    getAttribute: (name) => attrs.has(name) ? attrs.get(name) : null,
+    hasAttribute: (name) => attrs.has(name),
+    removeAttribute(name) { attrs.delete(name); },
+    matches(selector) {
+      return selector.split(',').some((part) => {
+        const item = part.trim();
+        if (item === '[class]') return element.classList.length > 0;
+        const valued = /^\[([^=\]]+)="([^"]*)"\]$/u.exec(item);
+        if (valued) return attrs.get(valued[1]) === valued[2];
+        const plain = /^\[([^\]]+)\]$/u.exec(item);
+        if (plain) return attrs.has(plain[1]);
+        return item.toUpperCase() === element.tagName;
+      });
+    },
+    closest(selector) {
+      for (let current = element; current; current = current.parentElement) {
+        if (current.matches(selector)) return current;
+      }
+      return null;
+    },
+    contains(candidate) {
+      if (candidate === element) return true;
+      return element.childNodes.some((child) => child.nodeType === 1 && child.contains(candidate));
+    },
+    append(...nodes) {
+      for (const node of nodes) {
+        detach(node);
+        node.parentNode = element;
+        node.parentElement = element;
+        element.childNodes.push(node);
+        if (node.nodeType === 1) element.children.push(node);
+        connect(node, element.isConnected);
+      }
+    },
+    after(...nodes) {
+      const parent = element.parentNode;
+      if (!parent) return;
+      let childAt = parent.childNodes.indexOf(element) + 1;
+      let elementAt = parent.children.indexOf(element) + 1;
+      for (const node of nodes) {
+        detach(node);
+        node.parentNode = parent;
+        node.parentElement = parent;
+        parent.childNodes.splice(childAt++, 0, node);
+        if (node.nodeType === 1) parent.children.splice(elementAt++, 0, node);
+        connect(node, parent.isConnected);
+      }
+    },
+    remove() { detach(element); },
+    replaceChildren(...nodes) {
+      for (const child of [...element.childNodes]) detach(child);
+      element.append(...nodes);
+    },
+    addEventListener(name, handler) { element.listeners.set(name, [...(element.listeners.get(name) ?? []), handler]); },
+    attachShadow() {
+      element.shadowRoot = linkedElement('#shadow');
+      element.shadowRoot.parentNode = element;
+      element.shadowRoot.parentElement = element;
+      return element.shadowRoot;
+    },
+    querySelectorAll(selector) {
+      const found = [];
+      const visit = (parent) => {
+        for (const child of parent.children) {
+          if (child.matches(selector)) found.push(child);
+          visit(child);
+        }
+      };
+      visit(element);
+      return found;
+    },
+    querySelector(selector) { return element.querySelectorAll(selector)[0] ?? null; }
+  };
+  Object.defineProperties(element, {
+    nextSibling: { get: () => {
+      const at = element.parentNode?.childNodes.indexOf(element) ?? -1;
+      return at >= 0 ? element.parentNode.childNodes[at + 1] ?? null : null;
+    } },
+    innerHTML: { get: () => element.childNodes.map((child) => child.textContent ?? '').join('') }
+  });
+  return element;
+}
+
 /** The button inside one pencil's shadow root. */
 function pinButton(pin) {
   return pin.shadowRoot.children.find((child) => child.tagName === 'BUTTON');
@@ -1226,20 +1525,81 @@ ok('the delete route tombstones one complete human turn without mutating the log
     'the hidden turn lost its direct-human boundary');
 });
 
-ok('the Host refuses both edit and delete while the agent is running', async () => {
+ok('the delete-message route tombstones exactly one assistant envelope without mutating the log', async () => {
+  const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], { id: 'edit-gui-delete-message' });
+  const before = panel.session.snapshotEvents();
+  const removed = await panel.answer(EDIT_METHODS.deleteMessage, {
+    sessionId: panel.sessionId, seq: panel.reply.seq, id: panel.reply.id, expected: 'ANSWER'
+  });
+  assert.equal(removed.body.result.value.ok, true, String(removed.body.result.value.reason));
+  assert.deepEqual(panel.session.snapshotEvents(), before, 'assistant deletion must not mutate the session log');
+  const expectedEdit = {
+    kind: 'delete-message',
+    id: `${panel.sessionId.slice(0, 8)}-m1`,
+    parent: null,
+    basis: 'effective',
+    before: 'ANSWER',
+    texts: ['ANSWER'],
+    members: [{ id: panel.reply.id, role: 'assistant', sourceKind: 'model', blocks: [{ type: 'text' }] }],
+    next: null,
+    at: 1,
+    anchor: { index: 1, role: 'assistant', blocks: [{ type: 'text' }] },
+    messageId: panel.reply.id
+  };
+  assert.deepEqual(panel.wire.editsFor(panel.sessionId), [expectedEdit]);
+  const restored = createEditStore();
+  assert.deepEqual(restored.editsFor(panel.sessionId), [expectedEdit], 'message tombstone was not durable');
+  publishEditStore(panel.sessionId, restored);
+  panel.reload();
+  const reloaded = panel.session.snapshotEvents();
+  assert.deepEqual(reloaded.slice(0, before.length), before, 'reload changed an original session event');
+  assert.deepEqual(reloaded.slice(before.length).map((event) => event.type), ['session/end-seed'],
+    'reload appended something other than the Session seed terminator');
+  const listed = (await panel.answer(EDIT_METHODS.list, { sessionId: panel.sessionId })).body.result.value;
+  assert.deepEqual(listed.transcript.map((entry) => entry.type), ['user/message'],
+    'assistant deletion removed the direct-human message too');
+  assert.equal(listed.hidden.length, 1, 'a partial deletion hid more than its exact assistant envelope');
+  assert.equal(listed.hidden[0].type, 'assistant/message');
+  assert.equal(listed.hidden[0].id, panel.reply.id);
+  assert.equal(listed.hidden[0].deletedMessage, true, 'the exact assistant tombstone was not identified');
+  assert.equal(listed.hidden[0].deletedTurn, false, 'a partial assistant deletion was classified as a whole turn');
+});
+
+ok('the delete-message route refuses stale assistant identity and content', async () => {
+  const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], { id: 'edit-gui-delete-message-stale' });
+  const before = panel.session.snapshotEvents();
+  for (const changed of [
+    { id: 'different-message', expected: 'ANSWER' },
+    { id: panel.reply.id, expected: 'CHANGED' }
+  ]) {
+    const removed = await panel.answer(EDIT_METHODS.deleteMessage, {
+      sessionId: panel.sessionId, seq: panel.reply.seq, ...changed
+    });
+    assert.equal(removed.body.result.value.ok, false, 'stale assistant deletion was accepted');
+  }
+  assert.deepEqual(panel.session.snapshotEvents(), before, 'a stale deletion mutated the session log');
+  assert.equal(panel.wire.editsFor(panel.sessionId).length, 0, 'a stale deletion wrote an overlay');
+  assert.deepEqual(createEditStore().editsFor(panel.sessionId), [], 'a stale deletion persisted an overlay');
+});
+
+ok('the Host refuses edit and both deletion kinds while the agent is running', async () => {
   const agent = { status: 'running' };
   const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], {
     id: 'edit-gui-idle-guard', agent, editor: { requireIdle: true }
   });
+  const before = panel.session.snapshotEvents();
   const payload = { sessionId: panel.sessionId, seq: panel.user.seq, id: panel.user.id, expected: 'QUESTION' };
   const edited = await panel.answer(EDIT_METHODS.commit, { ...payload, text: 'CHANGED' });
   const removed = await panel.answer(EDIT_METHODS.deleteTurn, payload);
-  for (const result of [edited, removed]) {
+  const replyRemoved = await panel.answer(EDIT_METHODS.deleteMessage, {
+    sessionId: panel.sessionId, seq: panel.reply.seq, id: panel.reply.id, expected: 'ANSWER'
+  });
+  for (const result of [edited, removed, replyRemoved]) {
     assert.equal(result.body.result.value.ok, false);
     assert.match(String(result.body.result.value.reason), /stop generation/i);
   }
   assert.equal(panel.wire.editsFor(panel.sessionId).length, 0);
-  assert.equal(panel.session.snapshotEvents().filter((event) => event.type === 'user/message').length, 1);
+  assert.deepEqual(panel.session.snapshotEvents(), before, 'a generation guard failure mutated the session log');
 });
 
 ok('the Host guard resolves the running agent from the exact session registry', async () => {
@@ -1249,8 +1609,13 @@ ok('the Host guard resolves the running agent from the exact session registry', 
   const removed = await panel.answer(EDIT_METHODS.deleteTurn, {
     sessionId: panel.sessionId, seq: panel.user.seq, id: panel.user.id, expected: 'QUESTION'
   });
-  assert.equal(removed.body.result.value.ok, false, 'a direct RPC bypassed the Host generation guard');
-  assert.match(String(removed.body.result.value.reason), /stop generation/i);
+  const replyRemoved = await panel.answer(EDIT_METHODS.deleteMessage, {
+    sessionId: panel.sessionId, seq: panel.reply.seq, id: panel.reply.id, expected: 'ANSWER'
+  });
+  for (const result of [removed, replyRemoved]) {
+    assert.equal(result.body.result.value.ok, false, 'a direct RPC bypassed the Host generation guard');
+    assert.match(String(result.body.result.value.reason), /stop generation/i);
+  }
   assert.equal(panel.wire.editsFor(panel.sessionId).length, 0, 'a refused deletion wrote an overlay');
 });
 
@@ -1411,6 +1776,130 @@ ok('the rule asked about the DEFAULT block is the rule with no block at all', ()
   assert.match(String(editability(both, 9).reason), /no block 9/u);
   assert.match(String(editability(userEntry([blockText('x')]), 9).reason), /no block 9/u);
   assert.match(String(editability(userEntry([blockText('x'), { type: 'image', source: {} }]), 1).reason), /image block/u);
+});
+
+ok('unsigned Thinking is discovered through only the verified public wrapper', () => {
+  const make = (classes = [], attributes = {}) => {
+    const attrs = new Map(Object.entries(attributes));
+    const node = {
+      children: [], classList: classes,
+      getAttribute: (name) => attrs.has(name) ? attrs.get(name) : null,
+      hasAttribute: (name) => attrs.has(name),
+      matches(selector) {
+        if (selector === '[data-variant="think"]') return attrs.get('data-variant') === 'think';
+        if (selector === '[data-tool], [data-variant]') return attrs.has('data-tool') || attrs.has('data-variant');
+        return false;
+      },
+      append(...children) { node.children.push(...children); }
+    };
+    return node;
+  };
+  const { textLayout } = panelConsts(injectEditor(PAGE), ['targetsOf', 'hasToken', 'textLayout']);
+  const entry = panelEntry(replyEntry([blockReasoning('THOUGHTS'), blockText('ANSWER')]));
+
+  for (const expanded of [false, true]) {
+    const row = make();
+    const slot = make([], { 'data-slot': 'conversation.chat.node' });
+    const root = make(['_root_hash_1']);
+    const body = make(['_body_hash_1']);
+    const processReasoning = make();
+    const think = make([], { 'data-variant': 'think', 'data-state': expanded ? 'open' : 'closed', ...(expanded ? { 'data-expanded': '' } : {}) });
+    const disclosure = make(['DisclosureRow_root_hash']);
+    think.append(disclosure);
+    if (expanded) think.append(make(['ReasoningRow_thinkBody_hash']));
+    processReasoning.append(think);
+    const markdown = make(['_markdown_hash_1']);
+    body.append(processReasoning, markdown);
+    root.append(body);
+    slot.append(root);
+    row.append(slot);
+    const childCount = think.children.length;
+    const state = think.getAttribute('data-state');
+    const layout = textLayout(row, entry);
+    assert.deepEqual(layout.thinks, [think], (expanded ? 'expanded' : 'collapsed') + ' Thinking was not found');
+    assert.deepEqual(layout.containers, [markdown], 'the answer container changed while finding Thinking');
+    assert.equal(layout.thoughts.length, 1, 'the unsigned reasoning target was not retained');
+    assert.equal(think.children.length, childCount, 'Thinking disclosure children were mutated');
+    assert.equal(think.getAttribute('data-state'), state, 'Thinking disclosure state was mutated');
+    assert.equal(think.hasAttribute('data-expanded'), expanded, 'Thinking was toggled during discovery');
+  }
+
+  const row = make();
+  const slot = make([], { 'data-slot': 'conversation.chat.node' });
+  const root = make(['AssistantMarkdown_root_hash']);
+  const body = make(['AssistantMarkdown_body_hash']);
+  const outer = make();
+  const unverifiedInner = make();
+  const nestedThink = make([], { 'data-variant': 'think' });
+  unverifiedInner.append(nestedThink);
+  outer.append(unverifiedInner);
+  body.append(outer);
+  root.append(body);
+  slot.append(root);
+  row.append(slot);
+  assert.deepEqual(textLayout(row, entry).thinks, [], 'an arbitrary descendant search crossed an unverified wrapper');
+});
+
+ok('edited Thinking projects through one stable wrapper without changing disclosure state', () => {
+  globalThis.__ctxkitProjectionDocument = {
+    createElement: (tag) => linkedElement(tag),
+    createTextNode: (text) => ({
+      nodeType: 3, textContent: String(text), childNodes: [], parentNode: null, parentElement: null, isConnected: false
+    })
+  };
+  const { STATE, projections, projectRow } = panelConsts(injectEditor(PAGE), [
+    'STATE', 'targetsOf', 'labelOf', 'badgeText', 'hasToken', 'embeddedContent', 'restoreDisplay',
+    'restoreProjection', 'textLayout', 'projections', 'projectRow'
+  ], 'const document = globalThis.__ctxkitProjectionDocument;');
+  STATE.sessionId = 'test-session';
+  const entry = {
+    type: 'assistant/message', seq: 17, id: 'reply-17', editable: true,
+    targets: [{ at: 0, kind: 'reasoning', label: 'Thinking', text: 'EDITED THINKING\\nSECOND', changed: true, editable: true }]
+  };
+  const connectTree = (node) => {
+    node.isConnected = true;
+    for (const child of node.childNodes ?? []) connectTree(child);
+  };
+  for (const expanded of [false, true]) {
+    const row = linkedElement('article', [], { 'data-chat-flow-key': '14:assistant-step8:2' });
+    const slot = linkedElement('div', [], { 'data-slot': 'conversation.chat.node' });
+    const root = linkedElement('div', ['_root_hash_1']);
+    const body = linkedElement('div', ['_body_hash_1']);
+    const processReasoning = linkedElement('div');
+    const think = linkedElement('div', [], {
+      'data-variant': 'think',
+      'data-state': expanded ? 'open' : 'closed',
+      ...(expanded ? { 'data-expanded': '' } : {})
+    });
+    const disclosure = linkedElement('div', ['_root_hash_2']);
+    const summary = linkedElement('span', ['_summaryText_hash_1']);
+    disclosure.append(summary);
+    think.append(disclosure);
+    if (expanded) think.append(linkedElement('div', ['_thinkBody_hash_1']));
+    processReasoning.append(think);
+    body.append(processReasoning);
+    root.append(body);
+    slot.append(root);
+    row.append(slot);
+    connectTree(row);
+    const state = think.getAttribute('data-state');
+    const nativeChildren = [...think.children];
+
+    projectRow(row, entry);
+    const hosts = row.querySelectorAll('[data-ctxkit-projection]');
+    assert.equal(hosts.length, 1, `${expanded ? 'expanded' : 'collapsed'} Thinking got more than one projection wrapper`);
+    assert.equal(projections.get(row)?.size, 1, 'one Thinking target created more than one projection record');
+    assert.ok(hosts[0].shadowRoot.querySelector('button'), 'the single projection wrapper lost its copy control');
+    const firstHost = hosts[0];
+    projectRow(row, entry);
+    assert.deepEqual(row.querySelectorAll('[data-ctxkit-projection]'), [firstHost],
+      're-decoration duplicated or replaced a stable Thinking projection');
+    assert.equal(think.getAttribute('data-state'), state, 'projection changed disclosure state');
+    assert.equal(think.hasAttribute('data-expanded'), expanded, 'projection toggled Thinking');
+    assert.deepEqual(think.children.filter((child) => !child.hasAttribute('data-ctxkit-projection')), nativeChildren,
+      'projection replaced or reordered native disclosure children');
+  }
+  delete globalThis.__ctxkitProjectionDocument;
 });
 
 /* ------------------------------------------------------------ the two pencils */
@@ -1596,6 +2085,33 @@ ok('the pencil key is <seq>:<at>, and the bare seq of the first release is still
   assert.deepEqual(targetKey('8'), { seq: 8, at: undefined });
   assert.deepEqual(targetKey(15, 0), { seq: 15, at: 0 });
   assert.deepEqual(targetKey(15, undefined), { seq: 15, at: undefined });
+});
+
+ok('a cached text click opens before an unresolved Host refresh', async () => {
+  globalThis.__ctxkitImmediate = { focuses: [], loads: [] };
+  const { STATE, openAt } = panelConsts(injectEditor(PAGE), [
+    'STATE', 'parseKey', 'targetKey', 'openAt'
+  ], [
+    'const syncSession = () => {};',
+    'const leaveDraft = () => true;',
+    'const focusInline = (seq, at, returnFocus) => { globalThis.__ctxkitImmediate.focuses.push([seq, at, returnFocus]); return Promise.resolve(true); };',
+    'const load = (foreground) => { globalThis.__ctxkitImmediate.loads.push(foreground); return new Promise(() => {}); };',
+    'const isCurrent = (sessionId, epoch) => STATE.sessionId === sessionId && STATE.epoch === epoch;',
+    'const currentSessionId = () => STATE.sessionId;'
+  ].join('\n'));
+  STATE.sessionId = 'session-cache';
+  STATE.epoch = 2;
+  STATE.listed = true;
+  STATE.transcript = [{ type: 'assistant/message', seq: 15, turn: 1, step: 1 }];
+  openAt(15, 0);
+  assert.deepEqual(globalThis.__ctxkitImmediate.focuses, [[15, 0, undefined]],
+    'the cached inline editor waited for the list RPC');
+  assert.deepEqual(globalThis.__ctxkitImmediate.loads, [], 'the background refresh started before cached focus resolved');
+  await Promise.resolve();
+  assert.deepEqual(globalThis.__ctxkitImmediate.loads, [false], 'cached success did not begin a background refresh');
+  assert.equal(STATE.pending, null, 'cached success was routed through the foreground pending path');
+  assert.doesNotMatch(String(openAt), /setTimeout/u, 'click-to-edit brought back a timer');
+  delete globalThis.__ctxkitImmediate;
 });
 
 /* ------------------------------------------------- the commit names its block */

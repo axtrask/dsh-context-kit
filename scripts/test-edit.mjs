@@ -828,5 +828,215 @@ check('an effective edit after deletion uses the compacted index but keeps origi
     && mixedDeletePlan.applied[1]?.index === 2 && mixedDeletePlan.applied[1]?.originIndex === 6,
   JSON.stringify(mixedDeletePlan.applied));
 
+/* ------------------------------------------ one-assistant deletion overlay */
+
+const assistantHistory = freezeRequest([
+  { id: 'assistant-sys', role: 'system', content: 'SYSTEM' },
+  userMessage('assistant-u1', text('First question')),
+  assistantMessage('assistant-call', text('Checking'), call('assistant-tool', 'read', '{}')),
+  resultMessage('assistant-result', 'assistant-tool', 'TOOL BODY'),
+  assistantMessage('assistant-final', text('First answer')),
+  userMessage('assistant-u2', text('Second question')),
+  assistantMessage('assistant-a2', text('Second answer')),
+  userMessage('assistant-u3', text('Third question'))
+], 'delete-assistant').messages;
+
+const messageStore = edit.createEditStore({ restore: false });
+const messageDelete = messageStore.deleteMessage('delete-assistant-call', assistantHistory, {
+  messageIndex: 2, messageId: 'assistant-call', expected: 'Checking{}'
+});
+const messagePlan = edit.planWireRewrite(assistantHistory, messageStore.editsFor('delete-assistant-call'));
+check('assistant deletion is a distinct effective message tombstone', messageDelete.ok === true
+  && messageDelete.edit?.kind === 'delete-message' && messageDelete.edit?.basis === 'effective');
+check('deleting a tool-calling assistant removes only it and its contiguous result',
+  messagePlan.messages.map((message) => message.id).join(',')
+    === 'assistant-sys,assistant-u1,assistant-final,assistant-u2,assistant-a2,assistant-u3',
+  messagePlan.messages.map((message) => message.id).join(','));
+check('assistant deletion reports stable provenance for its complete closure',
+  messagePlan.applied[0]?.originIndex === 2
+    && messagePlan.applied[0]?.removedOrigins?.join(',') === '2,3'
+    && messagePlan.applied[0]?.removedIds?.join(',') === 'assistant-call,assistant-result',
+  JSON.stringify(messagePlan.applied));
+
+const finalAnswerStore = edit.createEditStore({ restore: false });
+finalAnswerStore.deleteMessage('delete-assistant-final', assistantHistory, {
+  messageIndex: 4, messageId: 'assistant-final', expected: 'First answer'
+});
+const finalAnswerPlan = edit.planWireRewrite(assistantHistory, finalAnswerStore.editsFor('delete-assistant-final'));
+check('deleting a final answer keeps the completed tool exchange before it',
+  finalAnswerPlan.messages.map((message) => message.id).join(',')
+    === 'assistant-sys,assistant-u1,assistant-call,assistant-result,assistant-u2,assistant-a2,assistant-u3');
+
+const toolFreeStore = edit.createEditStore({ restore: false });
+toolFreeStore.deleteMessage('delete-assistant-tool-free', assistantHistory, {
+  messageIndex: 6, messageId: 'assistant-a2', expected: 'Second answer'
+});
+const toolFreePlan = edit.planWireRewrite(assistantHistory, toolFreeStore.editsFor('delete-assistant-tool-free'));
+check('a tool-free assistant deletion removes exactly one envelope',
+  toolFreePlan.applied[0]?.removedIds?.join(',') === 'assistant-a2');
+check('consecutive direct-user messages remain provider-valid after assistant deletion',
+  toolFreePlan.messages.slice(-2).every((message) => message.role === 'user')
+    && toolFreePlan.messages.slice(-2).map((message) => message.id).join(',') === 'assistant-u2,assistant-u3');
+
+const hostAssistantHistory = freezeRequest([
+  userMessage('host-assistant-u', text('Run the tool')),
+  assistantMessage('host-assistant-call', call('host-assistant-tool', 'ctx_execute', '{}')),
+  hostResultMessage('host-assistant-result', 'host-assistant-tool', 'done'),
+  assistantMessage('host-assistant-final', text('Finished'))
+], 'delete-host-assistant').messages;
+const hostAssistantStore = edit.createEditStore({ restore: false });
+const hostAssistantDelete = hostAssistantStore.deleteMessage('delete-host-assistant', hostAssistantHistory, {
+  messageIndex: 1, messageId: 'host-assistant-call', expected: '{}'
+});
+const hostAssistantPlan = edit.planWireRewrite(hostAssistantHistory, hostAssistantStore.editsFor('delete-host-assistant'));
+check('assistant deletion closes a live Host top-level tool result', hostAssistantDelete.ok === true
+  && hostAssistantPlan.messages.map((message) => message.id).join(',') === 'host-assistant-u,host-assistant-final');
+
+const nestedRoleToolHistory = freezeRequest([
+  userMessage('nested-role-tool-u', text('Run the tool')),
+  assistantMessage('nested-role-tool-call', call('nested-role-tool', 'ctx_execute', '{}')),
+  {
+    id: 'nested-role-tool-result',
+    role: 'tool',
+    content: [result('nested-role-tool', 'done')],
+    source: { kind: 'tool' }
+  },
+  assistantMessage('nested-role-tool-final', text('Finished'))
+], 'delete-nested-role-tool').messages;
+const nestedRoleToolStore = edit.createEditStore({ restore: false });
+const nestedRoleToolDelete = nestedRoleToolStore.deleteMessage('delete-nested-role-tool', nestedRoleToolHistory, {
+  messageIndex: 1, messageId: 'nested-role-tool-call', expected: '{}'
+});
+const nestedRoleToolPlan = edit.planWireRewrite(nestedRoleToolHistory, nestedRoleToolStore.editsFor('delete-nested-role-tool'));
+check('assistant deletion accepts a nested pairing id on a role=tool result', nestedRoleToolDelete.ok === true
+  && nestedRoleToolPlan.messages.map((message) => message.id).join(',') === 'nested-role-tool-u,nested-role-tool-final');
+
+const twoCallHistory = freezeRequest([
+  userMessage('two-u', text('Run both')),
+  assistantMessage('two-call', call('call-a', 'read', '{"a":1}'), call('call-b', 'read', '{"b":2}')),
+  resultMessage('two-result-a', 'call-a', 'A'),
+  hostResultMessage('two-result-b', 'call-b', 'B'),
+  assistantMessage('two-final', text('Both done'))
+], 'delete-two-calls').messages;
+const twoCallStore = edit.createEditStore({ restore: false });
+twoCallStore.deleteMessage('delete-two-calls', twoCallHistory, {
+  messageIndex: 1, messageId: 'two-call', expected: '{"a":1}{"b":2}'
+});
+const twoCallPlan = edit.planWireRewrite(twoCallHistory, twoCallStore.editsFor('delete-two-calls'));
+check('all contiguous results of one multi-call assistant travel with it',
+  twoCallPlan.messages.map((message) => message.id).join(',') === 'two-u,two-final');
+
+const assistantRefusal = (name, messages, pattern) => {
+  const answer = edit.createEditStore({ restore: false }).deleteMessage(name, messages, {
+    messageIndex: 1, messageId: messages[1]?.id
+  });
+  check(name, answer.ok === false && pattern.test(String(answer.reason)), String(answer.reason));
+};
+assistantRefusal('assistant deletion refuses a missing tool result', [
+  userMessage('missing-u', text('Run')),
+  assistantMessage('missing-call', call('missing-tool', 'read', '{}')),
+  assistantMessage('missing-final', text('No result'))
+], /no contiguous result/u);
+assistantRefusal('assistant deletion refuses an interleaved tool result', [
+  userMessage('interleaved-u', text('Run')),
+  assistantMessage('interleaved-call', call('interleaved-tool', 'read', '{}')),
+  userMessage('interleaved-boundary', text('Do not cross')),
+  resultMessage('interleaved-result', 'interleaved-tool', 'late')
+], /no contiguous result/u);
+assistantRefusal('assistant deletion refuses an unrelated result envelope', [
+  userMessage('unrelated-u', text('Run')),
+  assistantMessage('unrelated-call', call('wanted-tool', 'read', '{}')),
+  resultMessage('unrelated-result', 'foreign-tool', 'wrong')
+], /unrelated or ambiguous/u);
+assistantRefusal('assistant deletion refuses a tool-call block without a pairing id', [
+  userMessage('missing-call-id-u', text('Run')),
+  assistantMessage('missing-call-id-a', text('Checking'), { type: 'tool-call', name: 'read', arguments: '{}' }),
+  resultMessage('missing-call-id-r', 'unclaimed-tool', 'done')
+], /tool-call block has no pairing id/u);
+assistantRefusal('assistant deletion refuses a mixed tool-result envelope with an unpaired block', [
+  userMessage('missing-result-id-u', text('Run')),
+  assistantMessage('missing-result-id-a', call('paired-tool', 'read', '{}')),
+  {
+    id: 'missing-result-id-r',
+    role: 'user',
+    content: [result('paired-tool', 'done'), { type: 'tool-result', content: [text('orphan')] }],
+    source: { kind: 'tool' }
+  }
+], /tool-result block has no pairing id/u);
+assistantRefusal('assistant deletion refuses an empty top-level result pairing id', [
+  userMessage('empty-result-id-u', text('Run')),
+  assistantMessage('empty-result-id-a', call('paired-nested-tool', 'read', '{}')),
+  {
+    id: 'empty-result-id-r',
+    role: 'tool',
+    toolCallId: '',
+    content: [result('paired-nested-tool', 'done')],
+    source: { kind: 'tool' }
+  }
+], /tool-result envelope has no pairing id/u);
+assistantRefusal('assistant deletion refuses duplicate tool-call ids', [
+  userMessage('duplicate-call-u', text('Run')),
+  assistantMessage('duplicate-call-a', call('duplicate-tool', 'read', '{}'), call('duplicate-tool', 'write', '{}')),
+  resultMessage('duplicate-call-r', 'duplicate-tool', 'done')
+], /duplicate tool-call ids/u);
+assistantRefusal('assistant deletion refuses duplicate tool results anywhere in history', [
+  userMessage('duplicate-result-u', text('Run')),
+  assistantMessage('duplicate-result-a', call('duplicate-result-tool', 'read', '{}')),
+  resultMessage('duplicate-result-r1', 'duplicate-result-tool', 'first'),
+  resultMessage('duplicate-result-r2', 'duplicate-result-tool', 'second')
+], /missing or ambiguous/u);
+assistantRefusal('assistant deletion refuses a tool interaction crossing its boundary', [
+  userMessage('cross-u', text('Run')),
+  assistantMessage('cross-a', result('cross-tool', 'result inside target')),
+  assistantMessage('cross-call', call('cross-tool', 'read', '{}'))
+], /crosses the deletion boundary/u);
+
+const reloadedMessageStore = edit.createEditStore().editsFor('delete-assistant-call');
+const reloadedMessagePlan = edit.planWireRewrite(assistantHistory, reloadedMessageStore);
+check('an assistant-message tombstone survives reload and replay', reloadedMessageStore.length === 1
+  && reloadedMessageStore[0]?.kind === 'delete-message'
+  && reloadedMessagePlan.messages.map((message) => message.id).join(',')
+    === 'assistant-sys,assistant-u1,assistant-final,assistant-u2,assistant-a2,assistant-u3');
+
+const changedAssistantOrder = [...assistantHistory];
+changedAssistantOrder[3] = { ...changedAssistantOrder[3], id: 'replacement-result' };
+const changedAssistantPlan = edit.planWireRewrite(changedAssistantOrder, reloadedMessageStore);
+check('assistant deletion refuses a changed tool-result identity or order',
+  changedAssistantPlan.applied.length === 0 && changedAssistantPlan.refused.length === 1);
+const changedAssistantBoundary = [...assistantHistory];
+changedAssistantBoundary[4] = { ...changedAssistantBoundary[4], id: 'replacement-final' };
+const changedBoundaryPlan = edit.planWireRewrite(changedAssistantBoundary, reloadedMessageStore);
+check('assistant deletion refuses a changed following-message boundary',
+  changedBoundaryPlan.applied.length === 0 && changedBoundaryPlan.refused.length === 1);
+const ambiguousAssistantHistory = [
+  { id: 'inserted', role: 'system', content: 'INSERTED' },
+  ...assistantHistory,
+  assistantHistory[2], assistantHistory[3]
+];
+const ambiguousAssistantPlan = edit.planWireRewrite(ambiguousAssistantHistory, reloadedMessageStore);
+check('assistant deletion refuses duplicate matching identities after its index moves',
+  ambiguousAssistantPlan.applied.length === 0 && /refusing to guess/u.test(ambiguousAssistantPlan.refused[0]?.reason));
+
+const layeredAssistantHistory = [
+  userMessage('layered-u', text('Question')),
+  assistantMessage('layered-a', text('Original answer')),
+  userMessage('layered-next', text('Next'))
+];
+const layeredAssistantStore = edit.createEditStore({ restore: false });
+layeredAssistantStore.record('layered-assistant-delete', layeredAssistantHistory[1], 'Edited answer', {
+  messageIndex: 1, messageId: 'layered-a', expected: 'Original answer', basis: 'effective'
+});
+const editedAssistantHistory = edit.planWireRewrite(layeredAssistantHistory,
+  layeredAssistantStore.editsFor('layered-assistant-delete')).messages;
+layeredAssistantStore.deleteMessage('layered-assistant-delete', editedAssistantHistory, {
+  messageIndex: 1, messageId: 'layered-a', expected: 'Edited answer'
+});
+const layeredAssistantPlan = edit.planWireRewrite(layeredAssistantHistory,
+  layeredAssistantStore.editsFor('layered-assistant-delete'));
+check('assistant deletion chains after an effective edit and removes the edited envelope',
+  layeredAssistantPlan.ok && layeredAssistantPlan.applied.length === 2
+    && layeredAssistantPlan.messages.map((message) => message.id).join(',') === 'layered-u,layered-next',
+  JSON.stringify(layeredAssistantPlan));
+
 console.log(`\n${failures.length === 0 ? 'all edit behaviour tests passed' : `${failures.length} FAILURES: ${failures.join('; ')}`}`);
 process.exit(failures.length === 0 ? 0 : 1);

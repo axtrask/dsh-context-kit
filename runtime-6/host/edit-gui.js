@@ -22,9 +22,10 @@
  * ```
  *
  * The response is `{ type: "server-response", rpcId, result: { ok: true, value } }`
- * or `{ ok: false, error: { code, message, details } }`. Four methods exist:
+ * or `{ ok: false, error: { code, message, details } }`. Five methods exist:
  * `list` (the editable messages), `commit` (apply one replacement), `deleteTurn`
- * (hide one complete human turn) and `status` (config + counts). The panel also refreshes on session and transcript changes
+ * (hide one complete human turn), `deleteMessage` (hide one assistant message and
+ * its tool-result envelopes), and `status` (config + counts). The panel also refreshes on session and transcript changes
  * so closed-panel Chat projections can display the effective text.
  *
  * ## What it deliberately does not do
@@ -79,11 +80,12 @@ export const EDIT_CHANNEL = '/ctxkit.edit';
 /** Element id of the host the injected script mounts into. */
 const HOST_ID = 'dsh-context-kit-editor';
 
-/** The four methods the browser side may call. */
+/** The five methods the browser side may call. */
 export const EDIT_METHODS = Object.freeze({
   list: 'contextKit.edit.list',
   commit: 'contextKit.edit.commit',
   deleteTurn: 'contextKit.edit.deleteTurn',
+  deleteMessage: 'contextKit.edit.deleteMessage',
   status: 'contextKit.edit.status'
 });
 
@@ -221,7 +223,8 @@ function listValue(ctx, engine, sessionId) {
     turn: entry.turn,
     step: entry.step,
     directUser: entry.directUser === true,
-    deletedTurn: deletedTurnSeqs.has(entry.seq)
+    deletedTurn: deletedTurnSeqs.has(entry.seq),
+    deletedMessage: !deletedTurnSeqs.has(entry.seq) && entry.type === 'assistant/message'
   }));
   const entries = effectiveEntries.map(panelEntry);
   const editable = entries.filter((entry) => entry.editable);
@@ -393,6 +396,54 @@ function deleteTurnValue(ctx, engine, payload) {
   };
 }
 
+/** Record an effective-history tombstone for one assistant message and its tool results. */
+function deleteMessageValue(ctx, engine, payload) {
+  const config = editorConfig(engine);
+  if (config?.enabled !== true) {
+    return { ok: false, reason: 'the history editor is disabled; enable History Editor in Settings > Plugins' };
+  }
+  const busy = idleRefusal(ctx, engine, payload?.sessionId);
+  if (busy !== undefined) return { ok: false, reason: busy };
+  const session = sessionById(ctx, payload?.sessionId);
+  if (session === undefined) return { ok: false, reason: `no live session ${JSON.stringify(payload?.sessionId)}` };
+  const store = editStoreFor(payload?.sessionId);
+  if (store === undefined) {
+    return { ok: false, reason: 'no wire store is mounted for this session, so the message cannot be deleted; reload the server' };
+  }
+  const entries = effectiveEditableIndex(session, store.editsFor(payload?.sessionId) ?? []);
+  const at = entries.findIndex((candidate) => Number(candidate.seq) === Number(payload?.seq));
+  if (at < 0) {
+    return { ok: false, reason: `message seq ${String(payload?.seq)} is not on the surface any more; reload the list` };
+  }
+  const entry = entries[at];
+  if (payload?.id !== undefined && String(entry.id) !== String(payload.id)) {
+    return { ok: false, reason: `seq ${String(payload.seq)} now holds a different message (${String(entry.id)}); reload the list` };
+  }
+  if (entry.type !== 'assistant/message' || entry.message?.role !== 'assistant') {
+    return { ok: false, reason: 'only an assistant message can be deleted with this action' };
+  }
+  if (payload?.expected !== undefined && payload.expected !== entry.text) {
+    return { ok: false, reason: 'the selected message changed since deletion was requested; reload the list' };
+  }
+  const messages = entries.map((candidate) => candidate.message);
+  const recorded = store.deleteMessage(String(payload.sessionId), messages, {
+    messageIndex: at,
+    messageId: entry.id
+  });
+  if (recorded?.ok !== true) return { ok: false, reason: recorded?.reason ?? 'the message deletion was refused' };
+  return {
+    ok: true,
+    report: {
+      branch: WIRE_BRANCH,
+      seq: entry.seq,
+      messageId: entry.id,
+      editId: recorded.edit?.id,
+      removedIds: recorded.edit?.members?.map((member) => member.id) ?? [],
+      note: 'hidden from the next request the provider sees; the session log keeps the original message'
+    }
+  };
+}
+
 /**
  * Mount the channel and the button.
  *
@@ -467,6 +518,7 @@ export function installEditGui(ctx, engine) {
       if (method === EDIT_METHODS.list) return listValue(ctx, requestEngine(), payload?.sessionId);
       if (method === EDIT_METHODS.commit) return commitValue(ctx, requestEngine(), payload);
       if (method === EDIT_METHODS.deleteTurn) return deleteTurnValue(ctx, requestEngine(), payload);
+      if (method === EDIT_METHODS.deleteMessage) return deleteMessageValue(ctx, requestEngine(), payload);
       if (method === EDIT_METHODS.status) {
         const active = engine ?? engineFromBridge();
         const session = sessionById(ctx, payload?.sessionId);

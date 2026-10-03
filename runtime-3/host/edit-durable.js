@@ -165,8 +165,9 @@ export function effectiveEditableIndex(session, edits = []) {
       event = source;
     }
     const durable = originSeq !== entry.seq;
-    const history = edits.filter((edit) => edit.kind !== 'delete-turn' && (applied.get(edit.id)?.originIndex === originIndex
-      || (edit.messageId !== undefined && entry.id !== undefined && String(edit.messageId) === String(entry.id))));
+    const history = edits.filter((edit) => edit.kind !== 'delete-turn' && edit.kind !== 'delete-message'
+      && (applied.get(edit.id)?.originIndex === originIndex
+        || (edit.messageId !== undefined && entry.id !== undefined && String(edit.messageId) === String(entry.id))));
     const message = plan.messages[index];
     const metadata = (at) => {
       const here = at === undefined ? history : history.filter((edit) => edit.cursor.block === at);

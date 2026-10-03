@@ -516,6 +516,7 @@ if (HOST && HOST.shadowRoot === null) {
   };
 
   const canDeleteTurn = (entry) => entry?.type === 'user/message' && entry.directUser === true;
+  const canDeleteMessage = (entry) => entry?.type === 'assistant/message';
   const requestTurnDeletion = (entry, control) => {
     syncSession();
     if (generationRunning()) { say(STOP_GENERATION, 'err'); return; }
@@ -553,6 +554,52 @@ if (HOST && HOST.shadowRoot === null) {
         const loaded = await load(true);
         if (isCurrent(sessionId, epoch) && loaded) {
           say('Turn hidden from future model requests. The session log is unchanged.', 'good');
+        }
+      } catch (error) {
+        if (isCurrent(sessionId, epoch)) say('The request failed. ' + String(error && error.message || error), 'err');
+      } finally {
+        if (control?.isConnected) control.disabled = false;
+      }
+    }, 'Cancel');
+  };
+
+  const requestMessageDeletion = (entry, control) => {
+    syncSession();
+    if (generationRunning()) { say(STOP_GENERATION, 'err'); return; }
+    if (!leaveDraft(() => requestMessageDeletion(entry, control))) return;
+    const latest = entryFor(STATE.transcript, { turn: entry?.turn, step: entry?.step });
+    if (!canDeleteMessage(latest)) {
+      say('This message is no longer available; reopen the panel.', 'err');
+      return;
+    }
+    askConfirmation('Delete this assistant message?', 'Only this assistant message and any immediately following tool results that belong to it will be hidden from future model requests. The session log stays unchanged.', 'Delete message', async () => {
+      syncSession();
+      if (generationRunning()) { say(STOP_GENERATION, 'err'); return; }
+      const current = entryFor(STATE.transcript, { turn: latest.turn, step: latest.step });
+      if (!canDeleteMessage(current)) {
+        say('This message is no longer available; reopen the panel.', 'err');
+        return;
+      }
+      const sessionId = STATE.sessionId;
+      const epoch = STATE.epoch;
+      STATE.request += 1;
+      if (control?.isConnected) control.disabled = true;
+      say('Deleting message...');
+      try {
+        const value = await call('contextKit.edit.deleteMessage', {
+          sessionId,
+          seq: current.seq,
+          id: current.id,
+          expected: current.text
+        });
+        if (!isCurrent(sessionId, epoch)) return;
+        if (value.ok !== true) {
+          say('Not deleted. ' + (value.reason || 'The server refused the deletion.'), 'err');
+          return;
+        }
+        const loaded = await load(true);
+        if (isCurrent(sessionId, epoch) && loaded) {
+          say('Message hidden from future model requests. The session log is unchanged.', 'good');
         }
       } catch (error) {
         if (isCurrent(sessionId, epoch)) say('The request failed. ' + String(error && error.message || error), 'err');
@@ -683,21 +730,20 @@ if (HOST && HOST.shadowRoot === null) {
   // THE TEXT IS THE BUTTON. placePencil marks every region a reader may click to edit - the
   // markdown block, the Thinking element, the user bubble, or the whole message for a chooser -
   // and the document stylesheet below turns that mark into the hover affordance. The mark is one
-  // attribute on the shell's own node; the stylesheet paints outline and box-shadow only, so no
-  // layout property is written onto a native node and nothing there gains a containing block.
+  // attribute on the shell's own node; the stylesheet paints one outline only, so no layout
+  // property is written onto a native node and nothing there gains a containing block.
   const EDIT_ATTR = 'data-ctxkit-edit';
   const AFFORDANCE_ATTR = 'data-ctxkit-affordance';
   // Clicks that belong to the shell or to a reader's own gesture never open the editor: no
   // right-click, no click on a link, code, control or disclosure inside the text, and no click
   // once text is selected.
   const INNER_CONTROL = 'a, button, input, textarea, select, summary, code, pre, [contenteditable], [role="button"], [data-tool], [data-code-block], svg';
-  // A double-click selects a word with its FIRST click, so the open waits out the gesture and
-  // re-checks the selection instead of stealing the word.
-  const GESTURE_GRACE = 250;
+  // Kept as an exported script invariant: zero means there is no click-to-edit timer.
+  const GESTURE_GRACE = 0;
   // The reader's pointer opens the editor now, so the affordance must sit on the shell's own
   // nodes. A shadow stylesheet cannot reach them, which is the only reason this rule is in the
-  // document at all: it paints an outline and a translucent halo, both paint-only, so a hovered
-  // block never moves and nothing gains a containing block. A target's own editing surface is
+  // document at all. It paints one outline on the deepest hovered editable region, so nested
+  // message wrappers cannot paint the same affordance twice. A target's own editing surface is
   // excluded - while it is open, that surface is the control. Installed on the first placement,
   // which is the first moment a region can carry a mark.
   const installAffordance = () => {
@@ -705,14 +751,13 @@ if (HOST && HOST.shadowRoot === null) {
     const affordance = document.createElement('style');
     affordance.setAttribute(AFFORDANCE_ATTR, '');
     affordance.textContent = [
-      // The glow follows the palette accent when the palette is mounted and degrades to the native
-      // brand token, then to the literal, so the guard that forbids a palette-only glow still holds.
-      '[' + EDIT_ATTR + ']:hover { outline: 2px solid var(--studio-accent, var(--dsw-alias-brand-primary, #4d6bfe)); outline-offset: 2px; border-radius: 8px; box-shadow: 0 0 14px 3px color-mix(in srgb, var(--studio-accent, var(--dsw-alias-brand-primary, #4d6bfe)) 22%, transparent); }',
-      '[' + EDIT_ATTR + '][contenteditable]:hover, [' + EDIT_ATTR + ']:has([contenteditable]):hover { outline: none; box-shadow: none; }',
+      // The outline follows the palette accent when mounted and degrades to the native brand token.
+      // The not/has selector makes a nested marked child the sole hover winner.
+      '[' + EDIT_ATTR + ']:hover:not(:has([' + EDIT_ATTR + ']:hover)) { outline: 2px solid var(--studio-accent, var(--dsw-alias-brand-primary, #4d6bfe)); outline-offset: 2px; border-radius: 8px; }',
+      '[' + EDIT_ATTR + '][contenteditable]:hover, [' + EDIT_ATTR + ']:has([contenteditable]):hover { outline: none; }',
       // The pin contributes no chip any more, so keyboard focus has to be legible somewhere: the
-      // pin and the mark are siblings inside one wrapper, so a focused pin paints the same glow on
-      // the block it belongs to. Paint-only, exactly like the pointer glow above.
-      ':has(> [' + PENCIL_ATTR + ']:focus-within) > [' + EDIT_ATTR + '] { outline: 2px solid var(--studio-accent, var(--dsw-alias-brand-primary, #4d6bfe)); outline-offset: 2px; border-radius: 8px; box-shadow: 0 0 14px 3px color-mix(in srgb, var(--studio-accent, var(--dsw-alias-brand-primary, #4d6bfe)) 22%, transparent); }',
+      // pin and the mark are siblings inside one wrapper, so a focused pin paints the same outline.
+      ':has(> [' + PENCIL_ATTR + ']:focus-within) > [' + EDIT_ATTR + '] { outline: 2px solid var(--studio-accent, var(--dsw-alias-brand-primary, #4d6bfe)); outline-offset: 2px; border-radius: 8px; }',
       '[' + HIDDEN_TURN_ATTR + '] { display: none !important; }'
     ].join('\\n');
     document.head.append(affordance);
@@ -802,6 +847,18 @@ if (HOST && HOST.shadowRoot === null) {
   // the selection is gone, so whether the reader had one has to be read at press time.
   const pointed = new WeakSet();
   const pressed = { selected: false };
+  const regionOwners = new WeakMap();
+  const markRegion = (region) => {
+    const owners = (regionOwners.get(region) || 0) + 1;
+    regionOwners.set(region, owners);
+    region.setAttribute(EDIT_ATTR, '');
+  };
+  const unmarkRegion = (region) => {
+    const owners = (regionOwners.get(region) || 0) - 1;
+    if (owners > 0) { regionOwners.set(region, owners); return; }
+    regionOwners.delete(region);
+    region.removeAttribute(EDIT_ATTR);
+  };
 
   /**
    * The pin whose region the click landed in, deepest region first.
@@ -816,8 +873,8 @@ if (HOST && HOST.shadowRoot === null) {
       for (const region of pin.regions || []) {
         if (!region.contains(target)) continue;
         if (best === undefined) { best = { pin, region }; continue; }
-        if (best.region.contains(region)) continue;
-        if (region.contains(best.region)) best = { pin, region };
+        if (best.region.contains(region)) best = { pin, region };
+        else if (region.contains(best.region)) continue;
       }
     }
     return best?.pin;
@@ -829,8 +886,8 @@ if (HOST && HOST.shadowRoot === null) {
    *
    * Refused, in order: anything but a plain left click, a click the shell already handled
    * (defaultPrevented), a click on a link, code, control or disclosure inside the text, and a
-   * click made while text is selected. What survives is deferred by one gesture so that the first
-   * click of a double-click can still become a word selection, and re-checked before it opens.
+   * click made while text is selected. What survives opens immediately from the cached Host list;
+   * pointerdown preserves an existing selection before the browser can collapse it.
    */
   const pointerEdit = (node, event) => {
     const selectedBefore = pressed.selected;
@@ -845,16 +902,12 @@ if (HOST && HOST.shadowRoot === null) {
     if (selection && selection.isCollapsed === false) return;
     const pin = pinAt(node, clicked);
     if (pin === undefined || typeof pin.open !== 'function') return;
-    setTimeout(() => {
-      const current = document.getSelection?.();
-      if (current && current.isCollapsed === false) return;
-      if (!node.isConnected || !pin.isConnected) return;
-      const button = pin.shadowRoot?.querySelector('button');
-      // A hidden button means the panel's modal editor owns this target; the inline one excludes
-      // itself because its surface is contenteditable, which INNER_CONTROL already refuses.
-      if (button === undefined || button.hidden) return;
-      pin.open(pin.blockAt?.(clicked));
-    }, GESTURE_GRACE);
+    if (!node.isConnected || !pin.isConnected) return;
+    const button = pin.shadowRoot?.querySelector('button');
+    // A hidden button means the panel's modal editor owns this target; the inline one excludes
+    // itself because its surface is contenteditable, which INNER_CONTROL already refuses.
+    if (button === undefined || button.hidden) return;
+    pin.open(pin.blockAt?.(clicked));
   };
 
   const pointerOnce = (node) => {
@@ -961,7 +1014,7 @@ if (HOST && HOST.shadowRoot === null) {
     .map((entry) => entry.turn).filter(Number.isInteger));
   const deletedEntryFor = (entries, turns, node) => {
     const exact = entryFor(entries, targetOf(node));
-    if (exact?.deletedTurn === true) return exact;
+    if (exact?.deletedTurn === true || exact?.deletedMessage === true) return exact;
     return turns.has(turnOf(node)) ? { turn: turnOf(node) } : undefined;
   };
 
@@ -1030,8 +1083,10 @@ if (HOST && HOST.shadowRoot === null) {
 
   const placeDeleteAction = (node, entry) => {
     let host = node.querySelector('[' + DELETE_ACTION_ATTR + ']');
-    if (!canDeleteTurn(entry)) { host?.remove(); return; }
-    const key = String(entry.seq);
+    const deleteTurn = canDeleteTurn(entry);
+    const deleteMessage = canDeleteMessage(entry);
+    if (!deleteTurn && !deleteMessage) { host?.remove(); return; }
+    const key = (deleteTurn ? 'turn:' : 'message:') + String(entry.seq);
     if (host?.getAttribute(DELETE_ACTION_ATTR) === key && host.isConnected) return;
     host?.remove();
     host = document.createElement('span');
@@ -1044,18 +1099,20 @@ if (HOST && HOST.shadowRoot === null) {
       + '@media(pointer:coarse){button{min-width:44px;min-height:44px}}';
     const button = document.createElement('button');
     button.type = 'button';
-    button.textContent = 'Delete turn';
-    button.setAttribute('aria-label', 'Delete this user turn');
+    button.textContent = deleteTurn ? 'Delete turn' : 'Delete message';
+    button.setAttribute('aria-label', deleteTurn ? 'Delete this user turn' : 'Delete this assistant message');
     button.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
-      requestTurnDeletion(entry, button);
+      if (deleteTurn) requestTurnDeletion(entry, button);
+      else requestMessageDeletion(entry, button);
     });
     actionRoot.append(style, button);
     const strip = userActionStrip(node, entry);
-    const { containers } = textLayout(node, entry);
+    const { containers, thinks } = textLayout(node, entry);
     if (strip) strip.append(host);
-    else if (containers[0]) containers[0].after(host);
+    else if (containers.length) containers[containers.length - 1].after(host);
+    else if (thinks.length) thinks[thinks.length - 1].after(host);
     else node.append(host);
   };
 
@@ -1099,11 +1156,10 @@ if (HOST && HOST.shadowRoot === null) {
       }
       return undefined;
     };
-    for (const region of regions) region.setAttribute(EDIT_ATTR, '');
-    // Unmarking is idempotent, and it is the pin's one cleanup duty: the decoration loop drops
-    // pins by calling this, and a stale mark would leave a glow on a node nobody edits.
+    for (const region of regions) markRegion(region);
+    // Shared chooser/block regions retain the mark until their final pin is removed.
     pin.cleanup = () => {
-      for (const region of pin.regions || []) region.removeAttribute(EDIT_ATTR);
+      for (const region of pin.regions || []) unmarkRegion(region);
       pin.regions = [];
     };
     if (actions) actions.prepend(pin);
@@ -1117,11 +1173,11 @@ if (HOST && HOST.shadowRoot === null) {
     if (STATE.draft?.inline?.node === node) return;
     const wanted = [];
     const { targets, texts, thoughts, containers, thinks } = textLayout(node, entry);
-    const add = (target, key, source, text, preview = false, anchor = null, controlsOnly = false) => {
+    const add = (target, key, source, text, preview = false, anchor = null, includeControls = false) => {
       // Never hide media or independent actions embedded in a familiar container.
       if (source && (source.closest('[data-chat-flow-key]') !== node || source.closest('[data-trajectory-scroll]'))) source = null;
       if (source && embeddedContent(source)) source = null;
-      wanted.push({ target, key, source, text, preview, anchor, controlsOnly, fallback: !source && !controlsOnly });
+      wanted.push({ target, key, source, text, preview, anchor, includeControls, fallback: !source && !includeControls });
     };
     // UserStyleBubble combines all text blocks. Keep per-block editors, but project once.
     if (entry?.type === 'user/message' && entry.editable === true && targets.length > 0
@@ -1144,14 +1200,13 @@ if (HOST && HOST.shadowRoot === null) {
         if (think?.hasAttribute('data-expanded') && expanded.length === 1) {
           add(target, target.at + ':body', expanded[0], target.text);
         } else if (think && !think.hasAttribute('data-expanded') && summaries.length === 1) {
-          add(target, target.at + ':summary', summaries[0], target.text.split('\\n')[0].replaceAll('**', ''), true);
-          add(target, target.at + ':copy', null, null, false, think, true);
+          add(target, target.at + ':summary', summaries[0], target.text.split('\\n')[0].replaceAll('**', ''), true, null, true);
         } else add(target, String(target.at), null, target.text);
       }
     }
     const records = projections.get(node) || new Map();
     const signature = (item) => JSON.stringify([STATE.sessionId, entry?.seq, entry?.id, item.target.at,
-      item.text, item.target.text, badgeText(item.target), item.preview, item.fallback, item.controlsOnly]);
+      item.text, item.target.text, badgeText(item.target), item.preview, item.fallback, item.includeControls]);
     for (const [key, record] of records) {
       const item = wanted.find((item) => item.key === key);
       if (!item || item.source !== record.source || item.anchor !== record.anchor || signature(item) !== record.signature
@@ -1183,7 +1238,7 @@ if (HOST && HOST.shadowRoot === null) {
         content.append(summary);
         shadow.append(content);
       }
-      if (!item.preview) {
+      if (!item.preview || item.includeControls) {
         const badge = document.createElement('span');
         badge.className = 'badge' + (['refused', 'mixed'].includes(item.target.editStatus) ? ' refused' : '');
         badge.textContent = (inPlace ? '' : item.target.label + ': ') + badgeText(item.target)
@@ -1196,7 +1251,7 @@ if (HOST && HOST.shadowRoot === null) {
         text.textContent = item.text;
         content.append(text);
       }
-      if (!item.preview && item.target.editStatus !== 'refused') {
+      if ((!item.preview || item.includeControls) && item.target.editStatus !== 'refused') {
         const copy = document.createElement('button');
         copy.type = 'button';
         copy.textContent = 'Copy effective ' + labelOf(item.target);
@@ -1656,9 +1711,23 @@ if (HOST && HOST.shadowRoot === null) {
     const returnFocus = STATE.draft?.entry.seq === Number(seq) ? STATE.draft.inline?.returnFocus : undefined;
     if (!leaveDraft(() => openAt(seq, at))) return;
     const entry = STATE.transcript.find((entry) => entry.seq === wanted.seq);
-    STATE.pending = { ...wanted, inline: true, returnFocus, identity: entry?.type === 'user/message' ? entry.originId : { turn: entry?.turn, step: entry?.step } };
-    // Reload before opening in Chat, so the editor starts from what the
-    // server says now rather than from what the pencil saw a moment ago.
+    const identity = entry?.type === 'user/message' ? entry.originId : { turn: entry?.turn, step: entry?.step };
+    // Open synchronously from the last Host-validated list. Saving retains the original expected
+    // text and is revalidated by the Host, while a background refresh catches stale projections.
+    if (STATE.listed && entry) {
+      const sessionId = STATE.sessionId;
+      const epoch = STATE.epoch;
+      void focusInline(wanted.seq, wanted.at, returnFocus).then((opened) => {
+        if (!isCurrent(sessionId, epoch)) return;
+        if (opened) void load(false);
+        else {
+          STATE.pending = { ...wanted, inline: true, returnFocus, identity };
+          void load(true);
+        }
+      });
+      return;
+    }
+    STATE.pending = { ...wanted, inline: true, returnFocus, identity };
     void load(true);
   };
 
