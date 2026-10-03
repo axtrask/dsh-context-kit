@@ -8,9 +8,10 @@ window.__ModuleLoader__.load({
         let selectedSession;
         let selectedOwner;
         const readSelectedSession = () => selectedSession;
+        const readSelectedGeneration = () => selectedOwner?.runningRef.current === true;
         const notifySelectedSession = () => window.dispatchEvent(new Event('dsh-context-kit:session'));
-        const bindSelectedSession = sessionId => {
-          const owner = {};
+        const bindSelectedSession = (sessionId, runningRef) => {
+          const owner = { runningRef };
           const next = typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined;
           selectedOwner = owner;
           if (selectedSession !== next) {
@@ -254,8 +255,11 @@ window.__ModuleLoader__.load({
         });
         if (typeof ctx.inject === 'function') ctx.inject(['slots'], viewCtx => {
           const React = require('react'), h = React.createElement;
-          function ContextReadout({ useProjection, sessionId }) {
-            React.useEffect(() => bindSelectedSession(sessionId), [sessionId]);
+          function ContextReadout({ useProjection, useSessionStatus, sessionId }) {
+            const generating = useSessionStatus(statuses => statuses.get(sessionId)?.running === true);
+            const runningRef = React.useRef(generating);
+            runningRef.current = generating;
+            React.useEffect(() => bindSelectedSession(sessionId, runningRef), [sessionId]);
             const pressure = useProjection('contextPressure');
             const breakdown = useProjection('contextBreakdown');
             const [openedFor, setOpenedFor] = React.useState(null);
@@ -330,13 +334,19 @@ window.__ModuleLoader__.load({
           // The scoped composer slot owns the exact foreground Session identity. The
           // catalog deliberately has no selection field and must never be guessed here.
           window.__DSH_CONTEXT_KIT_SESSION__ = readSelectedSession;
+          window.__DSH_CONTEXT_KIT_GENERATING__ = readSelectedGeneration;
           notifySelectedSession();
           return () => {
-            if (window.__DSH_CONTEXT_KIT_SESSION__ !== readSelectedSession) return;
-            selectedOwner = undefined;
-            selectedSession = undefined;
-            delete window.__DSH_CONTEXT_KIT_SESSION__;
-            notifySelectedSession();
+            const ownsSession = window.__DSH_CONTEXT_KIT_SESSION__ === readSelectedSession;
+            const ownsGeneration = window.__DSH_CONTEXT_KIT_GENERATING__ === readSelectedGeneration;
+            if (!ownsSession && !ownsGeneration) return;
+            if (ownsSession) {
+              selectedOwner = undefined;
+              selectedSession = undefined;
+              delete window.__DSH_CONTEXT_KIT_SESSION__;
+            }
+            if (ownsGeneration) delete window.__DSH_CONTEXT_KIT_GENERATING__;
+            if (ownsSession) notifySelectedSession();
           };
         });
         // Older running hosts retain the panel script captured at import time.

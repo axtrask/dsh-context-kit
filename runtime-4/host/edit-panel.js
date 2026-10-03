@@ -723,7 +723,10 @@ if (HOST && HOST.shadowRoot === null) {
   const running = (node) => !!(node.closest('[data-streaming]:not([data-streaming="false"]), [data-state="running"]')
     || node.querySelector('[data-streaming]:not([data-streaming="false"]), [data-state="running"], [data-pending-steering], [data-submission-echo]'));
   const STOP_GENERATION = 'Generation is running. Stop generation before editing or deleting history.';
-  const generationRunning = () => chatRows().some(running);
+  const selectedGenerationRunning = () => {
+    try { return window.__DSH_CONTEXT_KIT_GENERATING__?.() === true; } catch { return false; }
+  };
+  const generationRunning = () => selectedGenerationRunning() || chatRows().some(running);
   const flowBody = (node) => {
     return String(node.getAttribute('data-chat-node-key') || node.getAttribute('data-chat-flow-key') || '').replace(/^[0-9]+:/u, '');
   };
@@ -1666,9 +1669,14 @@ if (HOST && HOST.shadowRoot === null) {
     wrap.classList.add('open');
     if (!wrap.open) { wrap.showModal(); el('header .x').focus(); }
   };
-  const open = () => {
+  const openPanel = () => {
     syncSession();
-    if (STATE.draft?.inline && !leaveDraft(open)) return;
+    if (generationRunning()) {
+      showPanel();
+      say(STOP_GENERATION, 'err');
+      return;
+    }
+    if (STATE.draft?.inline && !leaveDraft(openPanel)) return;
     showPanel();
     if (!STATE.draft) clearList();
     void load(true);
@@ -1681,7 +1689,7 @@ if (HOST && HOST.shadowRoot === null) {
     wrap.close();
     (returnFocus?.isConnected ? returnFocus : launch).focus();
   };
-  launch.addEventListener('click', open);
+  launch.addEventListener('click', openPanel);
   el('header .x').addEventListener('click', close);
   el('.scrim').addEventListener('click', close);
   // Native modal isolation makes the rest of the page inert; wrap Tab within our controls.

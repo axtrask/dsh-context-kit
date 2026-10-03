@@ -299,7 +299,50 @@ ok('the served session reader fails closed without an available controller selec
   assert.equal(readSession(), '');
 });
 
-ok('the classic client binds the selected session from the scoped composer slot', async () => {
+ok('the generation guard reads the scoped Session status before the DOM fallback', () => {
+  globalThis.__ctxkitGenerationBridge = { window: {}, rows: [] };
+  const { selectedGenerationRunning, generationRunning } = panelConsts(SCRIPT,
+    ['selectedGenerationRunning', 'generationRunning'], [
+      'const window = globalThis.__ctxkitGenerationBridge.window;',
+      'const chatRows = () => globalThis.__ctxkitGenerationBridge.rows;',
+      'const running = value => value === true;'
+    ].join('\n'));
+  assert.equal(selectedGenerationRunning(), false);
+  assert.equal(generationRunning(), false);
+  globalThis.__ctxkitGenerationBridge.window.__DSH_CONTEXT_KIT_GENERATING__ = () => true;
+  assert.equal(selectedGenerationRunning(), true);
+  assert.equal(generationRunning(), true);
+  globalThis.__ctxkitGenerationBridge.window.__DSH_CONTEXT_KIT_GENERATING__ = () => { throw Error('disposed'); };
+  globalThis.__ctxkitGenerationBridge.rows = [true];
+  assert.equal(selectedGenerationRunning(), false);
+  assert.equal(generationRunning(), true, 'the DOM compatibility fallback stopped working');
+  delete globalThis.__ctxkitGenerationBridge;
+});
+
+ok('activating Edit history while generation runs opens only the exact refusal', () => {
+  globalThis.__ctxkitLaunch = { running: true, calls: [], draft: null };
+  const { openPanel } = panelConsts(SCRIPT, ['openPanel'], [
+    'const STATE = { get draft() { return globalThis.__ctxkitLaunch.draft; } };',
+    'const syncSession = () => globalThis.__ctxkitLaunch.calls.push("sync");',
+    'const generationRunning = () => globalThis.__ctxkitLaunch.running;',
+    'const showPanel = () => globalThis.__ctxkitLaunch.calls.push("show");',
+    'const say = (message, kind) => globalThis.__ctxkitLaunch.calls.push([message, kind]);',
+    'const leaveDraft = () => { globalThis.__ctxkitLaunch.calls.push("leave"); return true; };',
+    'const clearList = () => globalThis.__ctxkitLaunch.calls.push("clear");',
+    'const load = () => globalThis.__ctxkitLaunch.calls.push("load");',
+    'const STOP_GENERATION = "Generation is running. Stop generation before editing or deleting history.";'
+  ].join('\n'));
+  openPanel();
+  assert.deepEqual(globalThis.__ctxkitLaunch.calls, ['sync', 'show',
+    ['Generation is running. Stop generation before editing or deleting history.', 'err']]);
+  globalThis.__ctxkitLaunch.running = false;
+  globalThis.__ctxkitLaunch.calls = [];
+  openPanel();
+  assert.deepEqual(globalThis.__ctxkitLaunch.calls, ['sync', 'show', 'clear', 'load']);
+  delete globalThis.__ctxkitLaunch;
+});
+
+ok('the classic client binds the selected session and generation from the scoped composer slot', async () => {
   const script = readFileSync(join(ROOT, 'lib', 'edit-client.js'), 'utf8');
   const window = new EventTarget();
   let registration;
@@ -307,12 +350,14 @@ ok('the classic client binds the selected session from the scoped composer slot'
   runInNewContext(script, { window, Event });
   assert.equal(registration.id, 'dsh-context-kit');
   assert.equal(window.__DSH_CONTEXT_KIT_SESSION__, undefined, 'registration must remain lazy');
+  assert.equal(window.__DSH_CONTEXT_KIT_GENERATING__, undefined, 'generation registration must remain lazy');
   let component;
   let effects = [];
+  const refs = [];
   const React = {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     useEffect: effect => { effects.push(effect); },
-    useRef: () => ({ current: null }),
+    useRef: initial => { const ref = { current: initial }; refs.push(ref); return ref; },
     useState: initial => [initial, () => {}]
   };
   const plugin = registration.factory(id => id === 'react' ? React : (() => { throw Error('unexpected module: ' + id); })());
@@ -337,22 +382,34 @@ ok('the classic client binds the selected session from the scoped composer slot'
     await provider.await(); await consumer.await();
     assert.equal(typeof component, 'function', 'the scoped composer bridge must be registered');
     assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), undefined);
-    const mount = sessionId => {
+    assert.equal(window.__DSH_CONTEXT_KIT_GENERATING__(), false);
+    const mount = (sessionId, running) => {
       effects = [];
-      component({ sessionId, useProjection: () => undefined });
+      const firstRef = refs.length;
+      const statuses = new Map([[sessionId, { running }]]);
+      component({ sessionId, useProjection: () => undefined, useSessionStatus: selector => selector(statuses) });
       const cleanups = effects.map(effect => effect()).filter(value => typeof value === 'function');
-      return () => { for (const cleanup of cleanups.reverse()) cleanup(); };
+      return { runningRef: refs[firstRef], unmount() { for (const cleanup of cleanups.reverse()) cleanup(); } };
     };
-    const unmountA = mount('A');
+    const mountedA = mount('A', false);
     assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), 'A', 'the exact slot sessionId must become the editor selection');
-    const unmountB = mount('B');
+    assert.equal(window.__DSH_CONTEXT_KIT_GENERATING__(), false);
+    const mountedB = mount('B', true);
     assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), 'B');
-    unmountA();
+    assert.equal(window.__DSH_CONTEXT_KIT_GENERATING__(), true, 'the exact slot status must become the generation guard');
+    mountedB.runningRef.current = false;
+    mountedA.runningRef.current = true;
+    assert.equal(window.__DSH_CONTEXT_KIT_GENERATING__(), false, 'a stale slot status update must not replace the foreground status');
+    mountedB.runningRef.current = true;
+    mountedA.unmount();
     assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), 'B', 'stale slot cleanup must not clear the newer selection');
-    unmountB();
+    assert.equal(window.__DSH_CONTEXT_KIT_GENERATING__(), true, 'stale slot cleanup must not clear the newer generation status');
+    mountedB.unmount();
     assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), undefined);
+    assert.equal(window.__DSH_CONTEXT_KIT_GENERATING__(), false);
     await provider.dispose(); await consumer.await();
     assert.equal(window.__DSH_CONTEXT_KIT_SESSION__, undefined);
+    assert.equal(window.__DSH_CONTEXT_KIT_GENERATING__, undefined);
     assert.deepEqual(notifications, [undefined, 'A', 'B', undefined, undefined]);
   } finally { await consumer.dispose(); await provider.dispose(); }
 });
