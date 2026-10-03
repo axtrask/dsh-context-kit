@@ -1,0 +1,6 @@
+# CDSH bundle layer. Relative package paths are resolved beside this patch.
+# The row id must remain globally unique in the composed Loader configuration.
+- insert:
+    - id: cdsh
+      name: 'cdsh'
+      config: {}
