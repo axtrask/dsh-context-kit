@@ -613,6 +613,40 @@ try {
     && /Estimated tokens for compressed spans: \d+ before, \d+ after, -?\d+ freed\./.test(rendered), rendered);
   check('successful output exposes no internal seq values', !/seq|range \d|shadowed/i.test(rendered), rendered);
 
+  const renderedSessionId = String(renderedFixture.session.id);
+  const renderedStatePath = join(testHome, 'context-kit', 'dcp-state', `${renderedSessionId}.json`);
+  const renderedState = standard.engine.blocksFor(renderedFixture.session);
+  const renderedBlockId = String(renderedValue.blocks[0].blockId);
+  const renderedOperationId = renderedState.get(renderedBlockId)?.operationId;
+  renderedState.manualPermit = true;
+  const renderedStateBeforeReplay = JSON.stringify(renderedState.toJSON());
+  const saveBlocksStrict = standard.engine.saveBlocksStrict;
+  let committedReplayWrites = 0;
+  standard.engine.saveBlocksStrict = (...args) => {
+    committedReplayWrites += 1;
+    return saveBlocksStrict.apply(standard.engine, args);
+  };
+  try {
+    standard.engine.reconcileCompressionOperations(renderedFixture.session);
+  } finally {
+    standard.engine.saveBlocksStrict = saveBlocksStrict;
+  }
+  check('healthy committed history performs no registry write and preserves a re-armed manual permit', committedReplayWrites === 0
+    && renderedState.manualPermit === true && JSON.stringify(renderedState.toJSON()) === renderedStateBeforeReplay);
+
+  rmSync(renderedStatePath, { force: true });
+  standard.engine._blocksBySession.delete(renderedSessionId);
+  standard.engine._compressionJournals.delete(renderedSessionId);
+  const missingRenderedState = standard.engine.blocksFor(renderedFixture.session);
+  missingRenderedState.manualPermit = true;
+  const repairOperation = standard.engine.compressionJournal(renderedFixture.session).get(renderedOperationId);
+  repairOperation.plan.reservation.consumeManualPermit = true;
+  standard.engine.reconcileCompressionOperations(renderedFixture.session);
+  check('committed history repairs a missing registry without consuming a re-armed manual permit', missingRenderedState.size === 1
+    && missingRenderedState.get(renderedBlockId)?.operationId === renderedOperationId
+    && missingRenderedState.manualPermit === true
+    && existsSync(renderedStatePath));
+
   const messageMode = await mount({ compress: { mode: 'message' } });
   const messageProperties = Object.keys(messageMode.tool.parameters.properties.content.items.properties).sort();
   check('message mode also uses string aliases, never numeric seq', JSON.stringify(messageProperties) === JSON.stringify(['messageId', 'summary', 'topic'])

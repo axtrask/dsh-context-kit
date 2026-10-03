@@ -25,7 +25,14 @@ export const COMPRESSION_OPERATION_TERMINALS = Object.freeze(['committed', 'fail
 
 const PHASE_INDEX = new Map(COMPRESSION_OPERATION_PHASES.map((phase, index) => [phase, index]));
 const VALID_PHASES = new Set([...COMPRESSION_OPERATION_PHASES, ...COMPRESSION_OPERATION_TERMINALS]);
+const RETRYABLE_RENAME_ERROR_CODES = new Set(['EACCES', 'EBUSY', 'EPERM']);
+const DEFAULT_RENAME_RETRY_DELAYS = Object.freeze([10, 20, 40, 80, 160, 250, 250, 250]);
+const SLEEP_CELL = new Int32Array(new SharedArrayBuffer(4));
 let temporaryCounter = 0;
+
+function blockFor(milliseconds) {
+  if (milliseconds > 0) Atomics.wait(SLEEP_CELL, 0, 0, milliseconds);
+}
 
 function durableDirectorySync(path) {
   if (process.platform === 'win32') return;
@@ -38,20 +45,47 @@ function durableDirectorySync(path) {
 }
 
 /** Atomically replace one JSON document and force its bytes to stable storage. */
-export function writeDurableJson(path, value) {
+export function writeDurableJson(path, value, options = {}) {
+  const serialized = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  // Multiple lifecycle hooks often converge on the same state in one turn.
+  // Compare the destination itself so an external replacement cannot make a
+  // process-local cache suppress the repair of stale or corrupted bytes.
+  try {
+    if (readFileSync(path).equals(serialized)) return false;
+  } catch (error) {
+    if (error?.code !== 'ENOENT' && !RETRYABLE_RENAME_ERROR_CODES.has(error?.code)) throw error;
+  }
+
   const directory = dirname(path);
   mkdirSync(directory, { recursive: true });
-  const serialized = `${JSON.stringify(value, null, 2)}\n`;
   const temporary = `${path}.${process.pid}.${temporaryCounter += 1}.tmp`;
+  const replace = options.renameSync ?? renameSync;
+  const sleep = options.sleepSync ?? blockFor;
+  const retryDelays = Array.isArray(options.renameRetryDelays)
+    ? options.renameRetryDelays
+    : DEFAULT_RENAME_RETRY_DELAYS;
   let descriptor;
   try {
     descriptor = openSync(temporary, 'w', 0o600);
-    writeFileSync(descriptor, serialized, 'utf8');
+    writeFileSync(descriptor, serialized);
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
-    renameSync(temporary, path);
+
+    let retryIndex = 0;
+    for (;;) {
+      try {
+        replace(temporary, path);
+        break;
+      } catch (error) {
+        const delay = retryDelays[retryIndex];
+        if (!RETRYABLE_RENAME_ERROR_CODES.has(error?.code) || delay === undefined) throw error;
+        retryIndex += 1;
+        sleep(delay);
+      }
+    }
     durableDirectorySync(directory);
+    return true;
   } catch (error) {
     if (descriptor !== undefined) {
       try { closeSync(descriptor); } catch { /* preserve the first failure */ }
