@@ -299,7 +299,7 @@ ok('the served session reader fails closed without an available controller selec
   assert.equal(readSession(), '');
 });
 
-ok('the classic client factory follows real Cordis service scope and observable teardown', async () => {
+ok('the classic client binds the selected session from the scoped composer slot', async () => {
   const script = readFileSync(join(ROOT, 'lib', 'edit-client.js'), 'utf8');
   const window = new EventTarget();
   let registration;
@@ -307,14 +307,16 @@ ok('the classic client factory follows real Cordis service scope and observable 
   runInNewContext(script, { window, Event });
   assert.equal(registration.id, 'dsh-context-kit');
   assert.equal(window.__DSH_CONTEXT_KIT_SESSION__, undefined, 'registration must remain lazy');
-  const plugin = registration.factory(() => { throw Error('the bridge needs no module imports'); });
+  let component;
+  let effects = [];
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    useEffect: effect => { effects.push(effect); },
+    useRef: () => ({ current: null }),
+    useState: initial => [initial, () => {}]
+  };
+  const plugin = registration.factory(id => id === 'react' ? React : (() => { throw Error('unexpected module: ' + id); })());
   assert.deepEqual(Array.from(plugin.inject), ['sessions']);
-  let snapshot = { current: 'A' };
-  const listeners = new Set();
-  const order = [];
-  const list = { getSnapshot() { order.push('read'); return snapshot; }, subscribe(listener) {
-    order.push('subscribe'); listeners.add(listener); return () => { order.push('unsubscribe'); listeners.delete(listener); };
-  } };
   const notifications = [];
   Object.defineProperty(window, 'localStorage', { get() { throw Error('the client must not read shared storage'); } });
   window.addEventListener('dsh-context-kit:session', () => notifications.push(window.__DSH_CONTEXT_KIT_SESSION__?.()));
@@ -322,25 +324,36 @@ ok('the classic client factory follows real Cordis service scope and observable 
   const consumer = root.plugin(plugin);
   await consumer.await();
   assert.equal(window.__DSH_CONTEXT_KIT_SESSION__, undefined);
-  const provider = root.plugin({ apply(ctx) { ctx.provide('sessions', { list }); } });
+  // The real SessionListState has no `current` field. Keeping that broken shape here
+  // prevents the editor from drifting back to a catalog-based selection guess.
+  const list = { getSnapshot: () => ({ ids: ['catalog-only'], byId: {}, phase: 'ready', projectionsBySession: {} }),
+    subscribe: () => { throw Error('session selection must not subscribe to the catalog'); } };
+  const slots = { inject: (_name, install) => install(), register: (spec, value) => {
+    if (spec.name === 'conversation.input.right') component = value;
+    return () => {};
+  } };
+  const provider = root.plugin({ apply(ctx) { ctx.provide('sessions', { list }); ctx.provide('slots', slots); } });
   try {
     await provider.await(); await consumer.await();
-    assert.deepEqual(order.slice(0, 2), ['subscribe', 'read']);
-    assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), 'A');
-    for (const listener of listeners) listener();
-    assert.deepEqual(notifications, ['A'], 'unrelated list changes must not trigger repeated panel fetches');
-    snapshot = { current: { sessionId: 'B' } }; for (const listener of listeners) listener();
-    assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), 'B', 'the real object-shaped controller selection must be unwrapped');
-    snapshot = { current: { sessionId: '' } }; for (const listener of listeners) listener();
+    assert.equal(typeof component, 'function', 'the scoped composer bridge must be registered');
     assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), undefined);
-    snapshot = { current: 'C' }; for (const listener of listeners) listener();
-    assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), 'C', 'older string-shaped snapshots remain supported');
-    snapshot = { current: undefined }; for (const listener of listeners) listener();
+    const mount = sessionId => {
+      effects = [];
+      component({ sessionId, useProjection: () => undefined });
+      const cleanups = effects.map(effect => effect()).filter(value => typeof value === 'function');
+      return () => { for (const cleanup of cleanups.reverse()) cleanup(); };
+    };
+    const unmountA = mount('A');
+    assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), 'A', 'the exact slot sessionId must become the editor selection');
+    const unmountB = mount('B');
+    assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), 'B');
+    unmountA();
+    assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), 'B', 'stale slot cleanup must not clear the newer selection');
+    unmountB();
     assert.equal(window.__DSH_CONTEXT_KIT_SESSION__(), undefined);
     await provider.dispose(); await consumer.await();
-    assert.equal(listeners.size, 0);
     assert.equal(window.__DSH_CONTEXT_KIT_SESSION__, undefined);
-    assert.deepEqual(notifications, ['A', 'B', undefined, 'C', undefined, undefined]);
+    assert.deepEqual(notifications, [undefined, 'A', 'B', undefined, undefined]);
   } finally { await consumer.dispose(); await provider.dispose(); }
 });
 
