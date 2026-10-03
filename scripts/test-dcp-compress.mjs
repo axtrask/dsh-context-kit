@@ -200,10 +200,15 @@ try {
   const rootProperties = Object.keys(standard.tool?.parameters?.properties ?? {});
   const rangeProperties = Object.keys(standard.tool?.parameters?.properties?.content?.items?.properties ?? {});
   check('the root schema is topic + content', JSON.stringify(rootProperties.sort()) === JSON.stringify(['content', 'topic']));
-  check('range entries are exactly startId/endId/summary', JSON.stringify(rangeProperties.sort()) === JSON.stringify(['endId', 'startId', 'summary']));
-  check('range boundaries and topic are strings', standard.tool.parameters.properties.topic.type === 'string'
+  check('range entries accept the misplaced topic compatibility field', JSON.stringify(rangeProperties.sort()) === JSON.stringify(['endId', 'startId', 'summary', 'topic'])
+    && standard.tool.parameters.properties.content.items.additionalProperties === false);
+  check('range boundaries and topics are strings', standard.tool.parameters.properties.topic.type === 'string'
     && standard.tool.parameters.properties.content.items.properties.startId.type === 'string'
-    && standard.tool.parameters.properties.content.items.properties.endId.type === 'string');
+    && standard.tool.parameters.properties.content.items.properties.endId.type === 'string'
+    && standard.tool.parameters.properties.content.items.properties.topic.type === 'string');
+  check('range topic is optional only at schema level for compatibility', !standard.tool.parameters.required.includes('topic')
+    && standard.tool.parameters.required.includes('content')
+    && !standard.tool.parameters.properties.content.items.required.includes('topic'));
   const description = standard.tool.description;
   check('the tool description teaches mNNNN and bN', description.includes('mNNNN') && description.includes('bN'));
   check('numeric protocol is absent from the model-facing tool', !/start_seq|end_seq|\[id\]|seq: number/.test(description + JSON.stringify(standard.tool.parameters)));
@@ -217,6 +222,49 @@ try {
   }
   check('the shipped numeric input shape is rejected', /missing required property "content\[0\]\.startId"/.test(oldShapeError?.message ?? '')
     && /start_seq.*not a declared property/.test(oldShapeError?.message ?? ''), oldShapeError?.message);
+
+  console.log('\n--- misplaced range topic compatibility ---');
+  const rootWins = fixture();
+  const rootWinsValue = await standard.tool.execute({
+    topic: ' Canonical batch topic ',
+    content: [
+      { startId: ref(standard.engine, rootWins.session, rootWins.user), endId: ref(standard.engine, rootWins.session, rootWins.user), topic: 'Wrong user topic', summary: 'ROOT-WINS-USER' },
+      { startId: ref(standard.engine, rootWins.session, rootWins.tail), endId: ref(standard.engine, rootWins.session, rootWins.tail), topic: 'Wrong tail topic', summary: 'ROOT-WINS-TAIL' }
+    ]
+  }, execFor(rootWins.session));
+  check('a root topic makes misplaced per-range topics harmless', rootWinsValue.compressed === true
+    && rootWinsValue.blocks.length === 2
+    && rootWinsValue.blocks.every((block) => block.topic === 'Canonical batch topic'), JSON.stringify(rootWinsValue.blocks));
+
+  const nestedFallback = fixture();
+  const nestedFallbackValue = await standard.tool.execute({
+    content: [
+      { startId: ref(standard.engine, nestedFallback.session, nestedFallback.user), endId: ref(standard.engine, nestedFallback.session, nestedFallback.user), topic: ' Nested fallback ', summary: 'NESTED-FALLBACK-USER' },
+      { startId: ref(standard.engine, nestedFallback.session, nestedFallback.tail), endId: ref(standard.engine, nestedFallback.session, nestedFallback.tail), topic: 'Nested fallback', summary: 'NESTED-FALLBACK-TAIL' }
+    ]
+  }, execFor(nestedFallback.session));
+  check('matching nested topics replace a missing root topic', nestedFallbackValue.compressed === true
+    && nestedFallbackValue.blocks.length === 2
+    && nestedFallbackValue.blocks.every((block) => block.topic === 'Nested fallback'), JSON.stringify(nestedFallbackValue.blocks));
+  const ambiguousFallback = fixture();
+  const ambiguousUserId = ref(standard.engine, ambiguousFallback.session, ambiguousFallback.user);
+  const ambiguousTailId = ref(standard.engine, ambiguousFallback.session, ambiguousFallback.tail);
+  const ambiguousBeforeEvents = JSON.stringify(ambiguousFallback.session.snapshotEvents());
+  const ambiguousBeforeState = JSON.stringify(standard.engine.blocksFor(ambiguousFallback.session).toJSON());
+  let ambiguousError;
+  try {
+    await standard.tool.execute({
+      content: [
+        { startId: ambiguousUserId, endId: ambiguousUserId, topic: 'First topic', summary: 'AMBIGUOUS-USER' },
+        { startId: ambiguousTailId, endId: ambiguousTailId, topic: 'Second topic', summary: 'AMBIGUOUS-TAIL' }
+      ]
+    }, execFor(ambiguousFallback.session));
+  } catch (error) {
+    ambiguousError = error;
+  }
+  check('different nested topics require one root topic with zero side effects', ambiguousError?.message === 'top-level topic is required when content[].topic values differ'
+    && JSON.stringify(ambiguousFallback.session.snapshotEvents()) === ambiguousBeforeEvents
+    && JSON.stringify(standard.engine.blocksFor(ambiguousFallback.session).toJSON()) === ambiguousBeforeState, ambiguousError?.message);
 
   console.log('\n--- validation and system exclusion ---');
   for (const [args, expected] of [
@@ -536,7 +584,19 @@ try {
 
   const messageMode = await mount({ compress: { mode: 'message' } });
   const messageProperties = Object.keys(messageMode.tool.parameters.properties.content.items.properties).sort();
-  check('message mode also uses string aliases, never numeric seq', JSON.stringify(messageProperties) === JSON.stringify(['messageId', 'summary', 'topic']));
+  check('message mode also uses string aliases, never numeric seq', JSON.stringify(messageProperties) === JSON.stringify(['messageId', 'summary', 'topic'])
+    && messageMode.tool.parameters.required.includes('topic'));
+  const missingMessageBatchTopic = fixture();
+  const missingMessageId = ref(messageMode.engine, missingMessageBatchTopic.session, missingMessageBatchTopic.user);
+  let missingMessageTopicError;
+  try {
+    await messageMode.tool.execute({
+      content: [{ messageId: missingMessageId, topic: 'Per-message topic', summary: 'MUST-NOT-RUN' }]
+    }, execFor(missingMessageBatchTopic.session));
+  } catch (error) {
+    missingMessageTopicError = error;
+  }
+  check('message mode still requires the root batch topic', /missing required property "topic"/.test(missingMessageTopicError?.message ?? ''), missingMessageTopicError?.message);
   const messageFixture = fixture();
   const messageId = ref(messageMode.engine, messageFixture.session, messageFixture.user);
   const messageValue = await messageMode.tool.execute({

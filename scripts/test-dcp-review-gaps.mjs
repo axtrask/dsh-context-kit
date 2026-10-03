@@ -709,10 +709,11 @@ try {
       assert.equal(rendered.includes('RENDERED-SUMMARY'), showCompression);
       assert.ok(mounted.commands.get('dcp-compress').input);
       const schema = mounted.tools.get('compress').parameters.properties;
-      assert.equal(schema.topic.description, "Short label (3-5 words) for display - e.g., 'Auth System Exploration'");
+      assert.equal(schema.topic.description, 'Short label (3-5 words) for the whole batch; canonical location');
       assert.equal(schema.content.description, 'One or more ranges to compress, each with start/end boundaries and a summary');
       assert.equal(schema.content.items.properties.startId.description, 'Message or block ID marking the beginning of range (e.g. m0001, b2)');
       assert.equal(schema.content.items.properties.endId.description, 'Message or block ID marking the end of range (e.g. m0012, b5)');
+      assert.equal(schema.content.items.properties.topic.description, 'Fallback when the top-level topic is missing; all non-empty values must match');
     }
     const messageMode = await mount({ strategies: strategiesOff, compress: { mode: 'message' } });
     const messageSchema = messageMode.tools.get('compress').parameters.properties;

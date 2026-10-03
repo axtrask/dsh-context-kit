@@ -207,7 +207,10 @@ console.log('\n--- the port must actually USE them ---');
   check('dcp.js uses the upstream critical nudge', source.includes('CONTEXT_LIMIT_NUDGE'));
   check('the tool description comes from the upstream prompt', source.includes('COMPRESS_RANGE') && source.includes('formatExtension'));
   check('the compressed-block guidance is attached to nudges', source.includes('appendGuidanceToDcpTag'));
-  check('the range entry schema is strict and carries only string boundaries plus summary', source.includes('startId: { type: \'string\'') && source.includes('endId: { type: \'string\'') && source.includes('additionalProperties: false'));
+  check('the range entry schema stays strict while declaring the local topic fallback', source.includes('startId: { type: \'string\'')
+    && source.includes('endId: { type: \'string\'')
+    && source.includes("topic: { type: 'string', description: 'Fallback when the top-level topic is missing")
+    && source.includes('additionalProperties: false'));
 }
 
 if (failures.length > 0) {

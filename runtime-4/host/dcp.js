@@ -346,7 +346,9 @@ function requiredCompressionMessageEstimate(meter, message) {
 /** Validate every state-independent field before loading or reconciling session state. */
 function validateCompressionArgumentShape(args, messageMode) {
   const topic = typeof args?.topic === 'string' ? args.topic.trim() : '';
-  if (topic.length === 0) throw new Error('topic is required and must be a non-empty string');
+  if (messageMode && topic.length === 0) {
+    throw new Error('topic is required and must be a non-empty string');
+  }
   if (!Array.isArray(args?.content) || args.content.length === 0) {
     throw new Error('content is required and must be a non-empty array');
   }
@@ -371,7 +373,17 @@ function validateCompressionArgumentShape(args, messageMode) {
       throw new Error(`content[${index}].endId is required and must be a non-empty string`);
     }
   }
-  return topic;
+  if (messageMode || topic.length > 0) return topic;
+  const compatibilityTopics = [...new Set(args.content
+    .map((entry) => typeof entry?.topic === 'string' ? entry.topic.trim() : '')
+    .filter((entryTopic) => entryTopic.length > 0))];
+  if (compatibilityTopics.length === 0) {
+    throw new Error('topic is required and must be a non-empty string');
+  }
+  if (compatibilityTopics.length > 1) {
+    throw new Error('top-level topic is required when content[].topic values differ');
+  }
+  return compatibilityTopics[0];
 }
 
 function estimateWireMessages(meter, messages) {
@@ -2287,10 +2299,10 @@ function registerSurface(ctx, engine, legacyEditor = true) {
     parameters: {
       topic: {
         type: 'string',
-        required: true,
+        ...(configSnapshot.compress.mode === 'message' ? { required: true } : {}),
         description: configSnapshot.compress.mode === 'message'
           ? "Short label (3-5 words) for the overall batch - e.g., 'Closed Research Notes'"
-          : "Short label (3-5 words) for display - e.g., 'Auth System Exploration'"
+          : 'Short label (3-5 words) for the whole batch; canonical location'
       },
       content: {
         type: 'array',
@@ -2310,6 +2322,7 @@ function registerSurface(ctx, engine, legacyEditor = true) {
             : {
                 startId: { type: 'string', required: true, description: 'Message or block ID marking the beginning of range (e.g. m0001, b2)' },
                 endId: { type: 'string', required: true, description: 'Message or block ID marking the end of range (e.g. m0012, b5)' },
+                topic: { type: 'string', description: 'Fallback when the top-level topic is missing; all non-empty values must match' },
                 summary: { type: 'string', required: true, description: 'Complete technical summary replacing all content in range' }
               }
         }
@@ -2791,7 +2804,13 @@ function registerSurface(ctx, engine, legacyEditor = true) {
       card: 'generic',
       title: `compress (${Array.isArray(args.content) ? args.content.length : 0} entr${args.content?.length === 1 ? 'y' : 'ies'})`,
       kind: 'other',
-      rawInput: args.topic ?? ''
+      rawInput: typeof args.topic === 'string' && args.topic.trim().length > 0
+        ? args.topic.trim()
+        : (Array.isArray(args.content)
+            ? [...new Set(args.content
+              .map((entry) => typeof entry?.topic === 'string' ? entry.topic.trim() : '')
+              .filter((entryTopic) => entryTopic.length > 0))].join(', ')
+            : '')
     })
   });
   };

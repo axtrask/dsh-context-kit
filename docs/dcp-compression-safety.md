@@ -78,6 +78,8 @@ the parent is recompressed.
 - The harness exposes two separate appends, not a transaction. Unexpected failure
   between them can still leave a prune event; arbitrary rollback is not promised.
 - Previously corrupted registry entries and old embedded duplicates are not
-  migrated. Top-level `topic` remains required; nesting it in `content` is invalid.
+  migrated. A top-level `topic` remains canonical. Range mode tolerates misplaced
+  `content[].topic` values only as input compatibility: the root wins when present;
+  without it, all non-empty nested values must agree on one batch topic.
 - No live DSH restart, live-session repair or commit was performed. The user must
   restart DSH to load the updated plugin. Large-history hint latency was not measured.

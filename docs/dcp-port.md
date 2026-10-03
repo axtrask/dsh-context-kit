@@ -105,9 +105,12 @@ helper; production uses the materialization and shared-wire paths above.
 - Versioned `DcpBlockState` persists blocks, prune kinds, stats, nudge state, measured
   `summaryTokens`, manual permits, compaction marker, `nextBlockId`, and bidirectional
   raw-ID/`mNNNN` aliases per session. Versionless files migrate through tolerant defaults.
-- The range schema is `{topic: string, content: [{startId: string, endId: string,
-  summary: string}]}`. Both IDs must be visible `mNNNN`/`bN` references; equal boundaries
-  are valid. System messages, ignored notices, and the first subagent instruction have no ID.
+- The canonical range shape is `{topic: string, content: [{startId: string,
+  endId: string, summary: string}]}`. The local schema also declares optional
+  `content[].topic` for compatibility with misplaced fields: a root topic wins;
+  otherwise the non-empty nested values must all match and are lifted to one batch
+  topic. Both IDs must be visible `mNNNN`/`bN` references; equal boundaries are valid.
+  System messages, ignored notices, and the first subagent instruction have no ID.
 - DSH tool results are grouped by call ID under their assistant alias before an alias is
   resolved to internal surface boundaries. The internal range is then validated and
   materialized through `materializeSummary`; no sequence address is shown to the model.

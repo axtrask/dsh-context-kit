@@ -122,8 +122,12 @@ console.log('\n--- compress tool shape ---');
     );
     const entry = schema.properties?.content?.items ?? {};
     const entryKeys = Object.keys(entry.properties ?? {}).sort();
-    check('range entries use exact string startId/endId/summary fields', JSON.stringify(entryKeys) === JSON.stringify(['endId', 'startId', 'summary'])
-      && entry.properties.startId.type === 'string' && entry.properties.endId.type === 'string', entryKeys.join(', '));
+    check('range entries preserve canonical fields plus the local topic fallback', JSON.stringify(entryKeys) === JSON.stringify(['endId', 'startId', 'summary', 'topic'])
+      && entry.properties.startId.type === 'string'
+      && entry.properties.endId.type === 'string'
+      && entry.properties.topic.type === 'string'
+      && entry.additionalProperties === false
+      && !(schema.required ?? []).includes('topic'), entryKeys.join(', '));
     check('no numeric message protocol remains in the schema or description', !/start_seq|end_seq|\[id\]|seq: number/.test(JSON.stringify(schema) + compress.description));
   }
 }
