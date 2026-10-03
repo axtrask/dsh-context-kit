@@ -313,7 +313,8 @@ window.__ModuleLoader__.load({
           const notify = () => window.dispatchEvent(new Event('dsh-context-kit:session'));
           const update = () => {
             const selected = list.getSnapshot()?.current;
-            const next = typeof selected === 'string' && selected.length > 0 ? selected : undefined;
+            const sessionId = typeof selected === 'string' ? selected : selected?.sessionId;
+            const next = typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined;
             if (initialized && current === next) return;
             initialized = true;
             current = next;
