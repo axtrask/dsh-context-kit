@@ -539,6 +539,21 @@ function syncVisibleBlockState(session, state, meter) {
   return changed;
 }
 
+/** Authoritative active block records in their current left-to-right surface order. */
+function orderedCompressedBlocks(references, state) {
+  const seen = new Set();
+  const blocks = [];
+  for (const group of references?.groups ?? []) {
+    if (group?.kind !== 'compressed-block') continue;
+    const registered = state.get(group.blockId);
+    const blockId = numericBlockId(registered?.blockId);
+    if (registered?.active === false || blockId === undefined || blockId !== group.blockId || seen.has(blockId)) continue;
+    seen.add(blockId);
+    blocks.push({ blockId, topic: registered.topic });
+  }
+  return blocks;
+}
+
 /**
  * Where upstream keeps its prompt-override directory.
  *
@@ -1436,7 +1451,7 @@ export class DcpCompactionEngine extends BasicCompactionEngine {
       anchors.add(group.rawMessageId);
       return anchors.size !== size;
     };
-    const guidance = buildCompressedBlockGuidance(state.active().map((block) => block.blockId));
+    const guidance = buildCompressedBlockGuidance(orderedCompressedBlocks(references, state));
 
     if (state.nudges.suppressNext) {
       state.nudges.suppressNext = false;
@@ -2159,7 +2174,7 @@ function appendNudgeToMessage(message, nudge) {
 function injectPendingNudge(session, state, engine, messages) {
   const references = collectMessageReferences(session, state);
   const groups = new Map(references.groups.filter((group) => group.kind === 'message').map((group) => [group.rawMessageId, group]));
-  const guidance = buildCompressedBlockGuidance(state.active().map((block) => block.blockId));
+  const guidance = buildCompressedBlockGuidance(orderedCompressedBlocks(references, state));
   const contextText = appendGuidanceToDcpTag(nudgeText({ over: true, text: engine.customPrompt('contextLimitNudge') }), guidance);
   const turnText = appendGuidanceToDcpTag(engine.customPromptFor('turnNudge', TURN_NUDGE).trim(), guidance);
   const iterationText = appendGuidanceToDcpTag(engine.customPromptFor('iterationNudge', ITERATION_NUDGE).trim(), guidance);
@@ -2595,7 +2610,7 @@ function registerSurface(ctx, engine, legacyEditor = true) {
         // Reserve only in local data; failed preparation must not consume an id.
         const blockId = String(firstBlockId + preparedPlans.length);
         const operationId = `${batchId}:block-${blockId}`;
-        const text = wrapBlockSummary(blockId, expandedSummary);
+        const text = wrapBlockSummary(blockId, expandedSummary, plan.topic);
         const message = createUserMessage({
           content: [{ type: 'text', text }],
           source: {
@@ -2956,6 +2971,7 @@ function registerSurface(ctx, engine, legacyEditor = true) {
       const availability = engine.availability(session);
       if (!availability.available) return { kind: 'error', text: availability.reason };
       const state = engine.blocksFor(session);
+      const references = engine.messageReferences(session);
       const focus = invocation.rawInput.trim();
       const prompt = [
         '<compress triggered manually>',
@@ -2963,7 +2979,7 @@ function registerSurface(ctx, engine, legacyEditor = true) {
         'Find the most significant completed conversation content that can be compressed into a high-fidelity technical summary.',
         'Follow the active compress mode, preserve all critical implementation details, and choose safe targets.',
         'Return after compress with a brief explanation of what content was compressed.',
-        engine.dcpConfig.compress.mode === 'range' ? buildCompressedBlockGuidance(state.active().map((block) => block.blockId)) : '',
+        engine.dcpConfig.compress.mode === 'range' ? buildCompressedBlockGuidance(orderedCompressedBlocks(references, state)) : '',
         focus.length > 0 ? `Additional user focus:\n${focus}` : ''
       ].filter((line) => line.length > 0).join('\n\n');
       state.manualPermit = true;

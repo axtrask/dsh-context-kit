@@ -482,10 +482,13 @@ try {
 
   console.log('\n--- exact block wrapper and bN boundaries ---');
   const boundary = fixture();
-  const first = await compressRange(standard, boundary, boundary.user, boundary.user, 'FIRST-BLOCK');
+  const boundaryTopic = '  Closed\nwork  ';
+  const first = await compressRange(standard, boundary, boundary.user, boundary.user, 'FIRST-BLOCK', boundaryTopic);
   check('the first compression lands as b1', first.blocks[0]?.blockId === '1');
-  const exactWrapper = '[Compressed conversation section]\nFIRST-BLOCK\n\n<dcp-message-id>b1</dcp-message-id>';
-  check('the durable replacement wrapper is exact', standard.engine.blocksFor(boundary.session).get('1')?.summary === exactWrapper, JSON.stringify(standard.engine.blocksFor(boundary.session).get('1')?.summary));
+  const exactWrapper = '[Compressed conversation section]\nBlock b1 — Topic: "Closed work"\n\nFIRST-BLOCK\n\nEnd of "Closed work" (b1) block\n\n<dcp-message-id>b1</dcp-message-id>';
+  const storedBoundary = standard.engine.blocksFor(boundary.session).get('1');
+  check('the durable replacement wrapper has authoritative matching labels and canonical metadata', storedBoundary?.summary === exactWrapper, JSON.stringify(storedBoundary?.summary));
+  check('display normalization does not mutate the authoritative stored topic', storedBoundary?.topic === boundaryTopic.trim(), JSON.stringify(storedBoundary?.topic));
   const boundaryValue = await compressRange(standard, boundary, 'b1', 'b1', 'AFTER-BOUNDARY');
   const boundaryText = modelText(boundary.session);
   check('bN can be a range boundary', boundaryValue.compressed === true, boundaryValue.reason ?? '');
@@ -501,6 +504,7 @@ try {
   const blockOnlyText = modelText(blockOnly.session);
   check('startId=endId is accepted for a compressed block boundary', blockOnlyValue.compressed === true, blockOnlyValue.reason ?? '');
   check('one canonical marker preserves the old block exactly at that location', blockOnlyText.indexOf('before') < blockOnlyText.indexOf('BLOCK-ONLY-FIRST') && blockOnlyText.indexOf('BLOCK-ONLY-FIRST') < blockOnlyText.indexOf('after') && countOf(blockOnlyText, 'BLOCK-ONLY-FIRST') === 1, blockOnlyText);
+  check('preserved summaries do not leak nested presentation labels', !blockOnlyText.includes('Block b1 — Topic:') && !blockOnlyText.includes('(b1) block'), blockOnlyText);
   check('preserved lineage is complete', JSON.stringify(blockOnlyValue.blocks[0].childBlockIds) === '["1"]' && JSON.stringify(blockOnlyValue.blocks[0].preservedBlockIds) === '["1"]' && JSON.stringify(blockOnlyValue.blocks[0].absorbedBlockIds) === '[]');
 
   console.log('\n--- strict canonical placeholder semantics ---');

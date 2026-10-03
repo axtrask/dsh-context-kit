@@ -15,12 +15,22 @@ const text = (value) => ({ type: 'text', text: value });
 let scope;
 
 try {
-  const promptContract = `${prompts.COMPRESS_RANGE}\n${prompts.buildCompressedBlockGuidance([1, 2])}`;
+  const guidance = prompts.buildCompressedBlockGuidance([
+    { blockId: 4, topic: 'Fourth topic' },
+    { blockId: 2, topic: 'Second topic' },
+    { blockId: 1, topic: 'First topic' },
+    { blockId: 2, topic: 'Duplicate ignored' }
+  ]);
+  const promptContract = `${prompts.COMPRESS_RANGE}\n${guidance}`;
   assert.match(promptContract, /omit[\s\S]*absorb/i, 'runtime text must teach omission => absorption');
   assert.match(promptContract, /include[\s\S]*exactly once[\s\S]*preserve[\s\S]*verbatim/i,
     'runtime text must teach one marker => verbatim preservation');
   assert.doesNotMatch(promptContract, /required (?:block )?placeholder|exactly match the required set/i,
     'runtime text must not require every selected placeholder');
+  assert.match(promptContract, /current surface order: 3 \(b4 — "Fourth topic"; b2 — "Second topic"; b1 — "First topic"\)/,
+    'guidance must retain first-seen surface order, topics, and deduplication');
+  assert.ok(guidance.indexOf('b4') < guidance.indexOf('b2') && guidance.indexOf('b2') < guidance.indexOf('b1'),
+    'guidance must not numerically reorder block ids');
 
   for (const source of [
     'Keep this (because it matters).',
@@ -29,6 +39,37 @@ try {
     const result = placeholders.classifyAndExpandBlockPlaceholders(source);
     assert.equal(result.expandedSummary, source, `natural prose must survive unchanged: ${source}`);
   }
+
+  const noisyTopic = `  Multi-line\n\"quoted\" \\ delimiter ${'😀'.repeat(140)}  `;
+  const renderedTopic = placeholders.formatBlockTopic(noisyTopic);
+  const wrapped = placeholders.wrapBlockSummary(7, 'WRAPPED BODY', noisyTopic);
+  const wrapperLines = wrapped.split('\n');
+  assert.equal(wrapperLines[0], placeholders.COMPRESSED_BLOCK_HEADER);
+  assert.equal(wrapperLines[1], `Block b7 — Topic: ${renderedTopic}`);
+  assert.equal(wrapperLines.at(-3), `End of ${renderedTopic} (b7) block`);
+  assert.equal(wrapperLines.at(-1), '<dcp-message-id>b7</dcp-message-id>');
+  const parsedTopic = JSON.parse(renderedTopic);
+  assert.equal([...parsedTopic].length, placeholders.BLOCK_TOPIC_MAX_LENGTH,
+    'display topics must be bounded by Unicode code points');
+  assert.equal([...parsedTopic].at(-1), '…', 'oversized display topics must end with one ellipsis');
+  assert.doesNotMatch(parsedTopic, /\uFFFD/, 'Unicode truncation must not split a surrogate pair');
+  assert.equal(placeholders.restoreBlockSummary(wrapped), 'WRAPPED BODY',
+    'a matched presentation wrapper must restore only its body');
+  const mismatched = wrapped.replace('(b7) block', '(b8) block');
+  const mismatchedRestored = placeholders.restoreBlockSummary(mismatched);
+  assert.match(mismatchedRestored, /^Block b7 — Topic:/,
+    'mismatched readable markers must be preserved rather than stripped');
+  assert.match(mismatchedRestored, /End of .* \(b8\) block$/,
+    'the mismatched end marker must remain visible for safe failure');
+  const topicMismatch = wrapped.replace(`End of ${renderedTopic}`, 'End of "different topic"');
+  assert.match(placeholders.restoreBlockSummary(topicMismatch), /^Block b7 — Topic:/,
+    'mismatched topic labels must also remain visible for safe failure');
+  const malformedWrapper = wrapped.replace(`\n\nEnd of ${renderedTopic} (b7) block`, '');
+  assert.match(placeholders.restoreBlockSummary(malformedWrapper), /^Block b7 — Topic:/,
+    'a missing end marker must not cause destructive top-marker stripping');
+  const legacyWrapped = '[Compressed conversation section]\nLEGACY BODY\n\n<dcp-message-id>b9</dcp-message-id>';
+  assert.equal(placeholders.restoreBlockSummary(legacyWrapped), 'LEGACY BODY',
+    'legacy generic wrappers must remain restorable');
 
   const selected = [{
     blockId: 1,

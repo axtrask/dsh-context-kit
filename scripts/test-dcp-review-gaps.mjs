@@ -534,6 +534,34 @@ try {
     await assert.rejects(() => compress(mounted, second, secondUser, secondUser, 'OTHER-SESSION'), /Manual mode: compress blocked/);
   });
 
+  await check('manual guidance follows real surface order and includes authoritative topics', async () => {
+    const mounted = await mount({ manualMode: false, automaticStrategies: false, pruneNotification: 'off', strategies: strategiesOff });
+    const session = await createSession(mounted);
+    session.append('turn/start', { turn: 1 });
+    const first = appendUser(session, 'FIRST-ORIGINAL');
+    const second = appendUser(session, 'SECOND-ORIGINAL');
+    const third = appendUser(session, 'THIRD-ORIGINAL');
+    const fourth = appendUser(session, 'FOURTH-ORIGINAL');
+    await compress(mounted, session, fourth, fourth, 'TAIL-SUMMARY', 'Tail topic');
+    await compress(mounted, session, second, second, 'MIDDLE-SUMMARY', 'Middle topic');
+    await compress(mounted, session, third, third, 'TEMP-SUMMARY', 'Temporary topic');
+    await compress(mounted, session, first, first, 'HEAD-SUMMARY', '  Head\n topic  ');
+    assert.equal((await command(mounted, session, 'decompress b3')).kind, 'success');
+
+    const visible = mounted.engine.messageReferences(session, { assign: false }).groups
+      .filter((group) => group.kind === 'compressed-block')
+      .map((group) => group.ref);
+    assert.deepEqual(visible, ['b4', 'b2', 'b1'], 'fixture must prove current physical surface order');
+
+    const injected = [];
+    assert.equal((await mounted.commands.get('dcp-compress').handler(commandInvocation(session, '', injected))).kind, 'success');
+    const prompt = allText(injected);
+    assert.match(prompt, /current surface order: 3 \(b4 — \\"Head topic\\"; b2 — \\"Middle topic\\"; b1 — \\"Tail topic\\"\)/);
+    assert.doesNotMatch(prompt, /Active compressed blocks in this session: 3 \(b1, b2, b4\)/,
+      'the old numerically sorted topic-less shape must remain invalid');
+    assert.ok(prompt.indexOf('b4') < prompt.indexOf('b2') && prompt.indexOf('b2') < prompt.indexOf('b1'), prompt);
+  });
+
   await check('/dcp manual is a persisted per-session override', async () => {
     const mounted = await mount({ manualMode: false, strategies: strategiesOff, pruneNotification: 'off' });
     const first = await createSession(mounted);

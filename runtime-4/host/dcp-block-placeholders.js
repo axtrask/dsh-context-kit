@@ -11,6 +11,18 @@ const CANONICAL_BLOCK_PLACEHOLDER = /\(b([1-9]\d*)\)/g;
 const LEGACY_BLOCK_PLACEHOLDER = /\{block_(\d+)\}/i;
 
 export const COMPRESSED_BLOCK_HEADER = '[Compressed conversation section]';
+export const BLOCK_TOPIC_MAX_LENGTH = 120;
+
+/** Render an arbitrary stored topic as one bounded, delimiter-safe line. */
+export function formatBlockTopic(topic) {
+  let normalized = String(topic ?? '').replace(/\s+/gu, ' ').trim();
+  if (normalized.length === 0) normalized = '(untitled)';
+  const characters = [...normalized];
+  if (characters.length > BLOCK_TOPIC_MAX_LENGTH) {
+    normalized = `${characters.slice(0, BLOCK_TOPIC_MAX_LENGTH - 1).join('')}…`;
+  }
+  return JSON.stringify(normalized);
+}
 
 export function numericBlockId(blockId) {
   const text = String(blockId ?? '').replace(/^[#b]/, '');
@@ -23,11 +35,14 @@ export function blockRef(blockId) {
   return `b${String(blockId).replace(/^[#b]/, '')}`;
 }
 
-export function wrapBlockSummary(blockId, summary) {
+export function wrapBlockSummary(blockId, summary, topic) {
+  const ref = blockRef(blockId);
+  const renderedTopic = formatBlockTopic(topic);
   const body = String(summary ?? '').trim();
-  return body.length === 0
-    ? `${COMPRESSED_BLOCK_HEADER}\n<dcp-message-id>${blockRef(blockId)}</dcp-message-id>`
-    : `${COMPRESSED_BLOCK_HEADER}\n${body}\n\n<dcp-message-id>${blockRef(blockId)}</dcp-message-id>`;
+  const top = `Block ${ref} — Topic: ${renderedTopic}`;
+  const end = `End of ${renderedTopic} (${ref}) block`;
+  const content = body.length === 0 ? `${top}\n\n${end}` : `${top}\n\n${body}\n\n${end}`;
+  return `${COMPRESSED_BLOCK_HEADER}\n${content}\n\n<dcp-message-id>${ref}</dcp-message-id>`;
 }
 
 export function parseBlockPlaceholders(summary) {
@@ -184,9 +199,28 @@ export function restoreBlockSummary(summary) {
   if (typeof summary !== 'string') return '';
   const headerMatch = summary.match(/^\s*\[Compressed conversation(?: section)?(?: b?\d+)?\]/i);
   if (headerMatch === null) return summary;
-  return summary
-    .slice(headerMatch[0].length)
-    .replace(/^(?:\r?\n)+/, '')
-    .replace(/(?:\r?\n)*<dcp-message-id>b?\d+<\/dcp-message-id>\s*$/i, '')
-    .replace(/(?:\r?\n)+$/, '');
+
+  let restored = summary.slice(headerMatch[0].length).replace(/^(?:\r?\n)+/, '');
+  let footerBlockId;
+  const footerMatch = restored.match(/(?:\r?\n)*<dcp-message-id>b?([1-9]\d*)<\/dcp-message-id>\s*$/i);
+  if (footerMatch !== null) {
+    footerBlockId = Number.parseInt(footerMatch[1], 10);
+    restored = restored.slice(0, footerMatch.index).replace(/(?:\r?\n)+$/, '');
+  } else {
+    restored = restored.replace(/(?:\r?\n)+$/, '');
+  }
+
+  const topMatch = restored.match(/^Block b([1-9]\d*) — Topic: ("(?:\\.|[^"\\])*")(?=\r?\n\r?\n)/);
+  if (topMatch === null || footerBlockId === undefined) return restored;
+  const afterTop = restored.slice(topMatch[0].length);
+  const separator = afterTop.match(/^\r?\n\r?\n/);
+  if (separator === null) return restored;
+  const candidate = afterTop.slice(separator[0].length);
+  const endMatch = candidate.match(/(?:^|(?:\r?\n){2})End of ("(?:\\.|[^"\\])*") \(b([1-9]\d*)\) block$/);
+  if (endMatch === null) return restored;
+
+  const topBlockId = Number.parseInt(topMatch[1], 10);
+  const endBlockId = Number.parseInt(endMatch[2], 10);
+  if (topBlockId !== footerBlockId || endBlockId !== footerBlockId || topMatch[2] !== endMatch[1]) return restored;
+  return candidate.slice(0, endMatch.index);
 }
