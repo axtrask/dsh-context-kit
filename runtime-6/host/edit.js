@@ -568,17 +568,25 @@ function sameDeletionSnapshot(message, snapshot) {
 function validateToolClosure(messages, start, end) {
   const calls = new Map();
   const results = new Map();
+  const addPosition = (map, id, index) => {
+    const positions = map.get(id) ?? [];
+    positions.push(index);
+    map.set(id, positions);
+  };
   for (const [index, message] of messages.entries()) {
+    // Current DSH projects a tool/result event as a role=tool message whose pairing
+    // id is top-level. Older request shapes carry a nested tool-result block instead.
+    // Deletion validates the provider-facing surface, so both shapes must close the
+    // same interaction before a whole turn may disappear.
+    if (message?.role === 'tool' && typeof message.toolCallId === 'string') {
+      addPosition(results, message.toolCallId, index);
+    }
     for (const block of (Array.isArray(message?.content) ? message.content : [])) {
       if (block?.type === 'tool-call' && typeof block.id === 'string') {
-        const positions = calls.get(block.id) ?? [];
-        positions.push(index);
-        calls.set(block.id, positions);
+        addPosition(calls, block.id, index);
       }
       if (block?.type === 'tool-result' && typeof block.toolCallId === 'string') {
-        const positions = results.get(block.toolCallId) ?? [];
-        positions.push(index);
-        results.set(block.toolCallId, positions);
+        addPosition(results, block.toolCallId, index);
       }
     }
   }

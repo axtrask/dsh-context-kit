@@ -40,6 +40,9 @@ const assistantMessage = (id, ...blocks) => ({ id, role: 'assistant', content: b
 const resultMessage = (id, callId, body) => ({
   id, role: 'user', content: [result(callId, body)], source: { kind: 'tool', callId }
 });
+const hostResultMessage = (id, callId, body) => ({
+  id, role: 'tool', toolCallId: callId, isError: false, content: [text(body)], source: { kind: 'tool', callId }
+});
 
 /** A frozen request, the way `dsh-agent-loop` hands it to the waterfall. */
 function freezeRequest(messages, sessionId = 'edit-test') {
@@ -687,6 +690,27 @@ check('turn deletion reports stable provenance for every removed message',
   firstPlan.applied[0]?.originIndex === 1
     && firstPlan.applied[0]?.removedOrigins?.join(',') === '1,2,3,4'
     && firstPlan.origins.join(',') === '0,5,6,7', JSON.stringify(firstPlan));
+
+// The live Host projects a tool result as a role=tool message whose pairing id is
+// top-level. The older nested tool-result shape above remains valid, but it cannot be
+// the only shape closure validation understands.
+const hostToolTurn = freezeRequest([
+  { id: 'host-sys', role: 'system', content: 'SYSTEM' },
+  userMessage('host-u1', text('Run the live tool')),
+  assistantMessage('host-a1-call', text('Running'), call('host-call', 'ctx_execute', '{}')),
+  hostResultMessage('host-r1', 'host-call', 'smoke-ok'),
+  assistantMessage('host-a1-final', text('done')),
+  userMessage('host-u2', text('Keep this turn'))
+], 'delete-host-tool-turn').messages;
+const hostToolStore = edit.createEditStore({ restore: false });
+const hostToolDelete = hostToolStore.deleteTurn('delete-host-tool-turn', hostToolTurn, {
+  messageIndex: 1, messageId: 'host-u1', expected: 'Run the live tool'
+});
+const hostToolPlan = edit.planWireRewrite(hostToolTurn, hostToolStore.editsFor('delete-host-tool-turn'));
+check('a live Host top-level tool result closes the deleted interaction',
+  hostToolDelete.ok === true
+    && hostToolPlan.messages.map((message) => message.id).join(',') === 'host-sys,host-u2',
+  JSON.stringify({ deletion: hostToolDelete, refused: hostToolPlan.refused }));
 
 const persistedDelete = edit.createEditStore().editsFor('delete-first');
 const persistedPlan = edit.planWireRewrite(turnMessages, persistedDelete);
