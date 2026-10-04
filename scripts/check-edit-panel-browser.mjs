@@ -39,7 +39,8 @@ const image = '<img alt="kept image" src="data:image/gif;base64,R0lGODlhAQABAIAA
 // Actual slot boundary and both installed CSS-module token formats, without matching aliases.
 const userRow = (key = 'u1', kind = 'user') => `<div data-chat-flow-key="13:input-message${key}" data-chat-flow-kind="${kind}"><div data-slot="conversation.chat.node" style="display:contents"><div class="Sixlwa_userRow"><div class="Sixlwa_userStack"><div data-message-attachments>${image}</div><div class="Sixlwa_bubble extra">QUESTION</div></div><button data-native-copy>Native copy</button></div></div></div>`;
 const assistantRow = (seq = 15) => `<div data-chat-flow-key="14:assistant-step${seq}:1" data-chat-flow-kind="assistant-step"><div data-slot="conversation.chat.node" style="display:contents"><div class="hWmORq_root"><div class="hWmORq_body"><div data-process-reasoning hidden="until-found"><div data-variant="think" data-state="ok"><div role="button" tabindex="0" data-fold aria-expanded="false">Think <span class="lcKema_summary"><span class="lcKema_summaryText">THINK A</span></span></div></div></div><div class="_markdown_kcgor_5 extra"><p>ANSWER</p></div><div data-images>${image}</div><section data-tool><div class="tool_body"><div class="tool_markdown">TOOL ORIGINAL</div></div><button>Tool action</button></section></div></div><button data-native-copy>Native copy</button></div></div>`;
-const markup = () => `<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px system-ui}main{max-width:850px;margin:auto;padding:16px} [data-chat-flow-key]{position:relative;padding:12px;margin:8px 0;border:1px solid #ccc} .Sixlwa_userStack{display:flex;flex-direction:column}.hWmORq_body{display:flex;flex-direction:column;gap:16px}.lcKema_summaryText{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lcKema_thinkBody{padding:4px 0 4px 22px;font-size:13px;line-height:20px;white-space:pre-wrap;word-break:break-word}img{width:16px;height:16px}</style><main><button id="outside-focus">Outside control</button><div data-chat-flow>${userRow()}${assistantRow()}</div><div data-trajectory-scroll><div data-chat-flow>${userRow()}${assistantRow()}</div></div><div data-chat-flow-key="14:assistant-step15:1" data-chat-flow-kind="assistant-step" id="outside">NOT CHAT</div></main><div id="dsh-context-kit-editor"></div>`;
+const assistantTail = (seq = 15) => `<div data-chat-flow-key="9:turn-tail${seq}" data-chat-flow-kind="turn-tail" data-chat-turn="${seq}"><div data-slot="conversation.chat.node" style="display:contents"><div class="xzv4MW_actions TS9iAW_actions"><button data-native-tail-copy>Native assistant copy</button></div></div></div>`;
+const markup = () => `<!doctype html><meta charset="utf-8"><style>body{margin:0;font:14px system-ui}main{max-width:850px;margin:auto;padding:16px} [data-chat-flow-key]{position:relative;padding:12px;margin:8px 0;border:1px solid #ccc} .Sixlwa_userStack{display:flex;flex-direction:column}.hWmORq_body{display:flex;flex-direction:column;gap:16px}.xzv4MW_actions{display:flex;align-items:center;gap:4px}.lcKema_summaryText{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lcKema_thinkBody{padding:4px 0 4px 22px;font-size:13px;line-height:20px;white-space:pre-wrap;word-break:break-word}img{width:16px;height:16px}</style><main><button id="outside-focus">Outside control</button><div data-chat-flow>${userRow()}${assistantRow()}${assistantTail()}</div><div data-trajectory-scroll><div data-chat-flow>${userRow()}${assistantRow()}${assistantTail()}</div></div><div data-chat-flow-key="14:assistant-step15:1" data-chat-flow-kind="assistant-step" id="outside">NOT CHAT</div></main><div id="dsh-context-kit-editor"></div>`;
 
 async function boot(page, current = 'A', mount = true) {
   await page.evaluate(current => {
@@ -58,9 +59,38 @@ async function boot(page, current = 'A', mount = true) {
     window.mountClient = () => {
       if (!registration) return;
       if (registration.id !== 'dsh-context-kit') throw Error('wrong client package id');
-      const plugin = registration.factory(() => { throw Error('unexpected client dependency'); });
+      const React = {
+        createElement: () => null,
+        useEffect: effect => { const cleanup = effect(); if (typeof cleanup === 'function') renderCleanups.push(cleanup); },
+        useRef: value => ({ current: value }),
+        useState: value => [value, () => {}]
+      };
+      const plugin = registration.factory(name => {
+        if (name === 'react') return React;
+        throw Error('unexpected client dependency: ' + name);
+      });
       if (JSON.stringify(plugin.inject) !== '["sessions"]') throw Error('wrong service injection');
-      plugin.apply({ sessions: { list: window.view }, effect: effect => { const cleanup = effect(); cleanups.push(cleanup); return cleanup; } });
+      const renderCleanups = [];
+      const slots = {
+        inject(name, install) {
+          const cleanup = install();
+          if (typeof cleanup === 'function') cleanups.push(cleanup);
+          return cleanup;
+        },
+        register(spec, Component) {
+          if (spec.name !== 'conversation.input.right') return () => {};
+          const render = () => {
+            for (const cleanup of renderCleanups.splice(0).reverse()) cleanup();
+            Component({ useProjection: () => undefined, useSessionStatus: () => false, ...spec.inject(window.view.getSnapshot().current) });
+          };
+          const unsubscribe = window.view.subscribe(render);
+          render();
+          return () => { unsubscribe(); for (const cleanup of renderCleanups.splice(0).reverse()) cleanup(); };
+        }
+      };
+      plugin.apply({ sessions: { list: window.view }, inject: (deps, apply) => {
+        if (deps.length === 1 && deps[0] === 'slots') apply({ slots });
+      }, effect: effect => { const cleanup = effect(); cleanups.push(cleanup); return cleanup; } });
     };
     window.disposeClient = () => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); };
     localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: current }));
@@ -158,7 +188,10 @@ async function fixture(run, { width = 1280, height = 900, rows = fixtures(), mou
   const panel = page.locator('#dsh-context-kit-editor');
   const row = seq => panel.locator(`li[data-seq="${seq}"]`);
   const chat = page.locator('main > [data-chat-flow]');
-  const refresh = () => page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  // Fixture state changes need a deterministic reload even while the editor panel is closed.
+  // Production focus refresh remains conditional, so tests for that path use focusRefresh.
+  const refresh = () => page.evaluate(() => window.dispatchEvent(new Event('dsh-context-kit:session')));
+  const focusRefresh = () => page.evaluate(() => window.dispatchEvent(new Event('focus')));
   const settle = () => page.waitForTimeout(380);
   const open = async seq => { await panel.locator('.launch').click(); await row(seq).locator('.edit').click(); };
   const save = async (seq, text) => { await row(seq).locator('textarea').fill(text); await row(seq).locator('.save').click();
@@ -185,7 +218,7 @@ async function fixture(run, { width = 1280, height = 900, rows = fixtures(), mou
   try {
     await settle();
     await Promise.race([
-      run({ page, context, panel, chat, row, state, refresh, settle, open, save, switchSession, hold }),
+      run({ page, context, panel, chat, row, state, refresh, focusRefresh, settle, open, save, switchSession, hold }),
       new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('regression case exceeded 20s')), 20000); })
     ]);
     await settle();
@@ -193,6 +226,9 @@ async function fixture(run, { width = 1280, height = 900, rows = fixtures(), mou
     await page.waitForTimeout(650);
     assert.equal(state.requests.length, count, 'observer must not repeatedly fetch its own mutations');
     assert.deepEqual(errors, [], 'browser console must be clean');
+  } catch (error) {
+    if (errors.length > 0) error.message += '\nBrowser errors:\n' + errors.join('\n');
+    throw error;
   } finally { clearTimeout(deadline); await context.close(); }
 }
 
@@ -374,23 +410,91 @@ try {
     assert.equal(await confirm.isVisible(), false);
     assert.equal(nativeDialogs, 0); assert.equal(state.commits.length, 0);
   });
-  await check('Comfort: user edit is alongside native actions, unavailable target explains why', async ({ page, chat, state, refresh, settle }) => {
+  await check('Comfort: native action placement is compact and unmatched rows stay quiet', async ({ page, chat, state, refresh, settle }) => {
     await chat.locator('.Sixlwa_userRow').evaluate(n => {
       const actions = document.createElement('div'); actions.className = 'xzv4MW_actions';
       actions.append(n.querySelector('[data-native-copy]')); n.append(actions);
     }); await settle();
-    assert.equal(await chat.locator('.xzv4MW_actions [data-ctxkit-for="8:0"]').count(), 1);
-    state.sessions.A.splice(0, 1); await refresh(); await settle();
-    const unavailable = chat.locator('[data-ctxkit-unavailable]');
-    assert.equal(await unavailable.count(), 1, 'an unavailable row must still carry its marker');
-    assert.match(await unavailable.evaluate((n) => n.shadowRoot.textContent), /^Unavailable: .*not among the messages/is,
-      'the unavailable reason is not permanently visible');
-    assert.equal(await unavailable.getAttribute('data-ctxkit-pencil'), null,
-      'an unavailable row is still a clickable edit affordance');
-    assert.equal(await unavailable.evaluate((n) => n.regions.length), 0);
-    const disabled = chat.locator('[data-ctxkit-delete] button');
-    assert.equal(await disabled.count(), 2, 'the unmatched user row lost its destructive controls');
-    assert.equal(await disabled.evaluateAll((buttons) => buttons.every((button) => button.disabled)), true);
+    const userPinLocations = await chat.locator('[data-ctxkit-for="8:0"]').evaluateAll((pins) => pins.map((pin) => pin.parentElement?.className || pin.parentElement?.tagName));
+    assert.equal(await chat.locator('.xzv4MW_actions [data-ctxkit-for="8:0"]').count(), 1,
+      'the user edit pin missed its native action strip: ' + JSON.stringify({ userPinLocations, requests: state.requests }));
+    const nativeStripPin = chat.locator('.xzv4MW_actions [data-ctxkit-for="8:0"]');
+    await nativeStripPin.locator('button').focus(); await settle();
+    assert.equal(await chat.locator('.Sixlwa_bubble').evaluate((node) => getComputedStyle(node).outlineStyle), 'solid',
+      'keyboard focus no longer reaches editable text after its pin moves into the native action strip');
+    await page.locator('#outside-focus').focus(); await settle();
+
+    const assistant = chat.locator('[data-chat-flow-kind="assistant-step"]');
+    const tail = chat.locator('[data-chat-flow-kind="turn-tail"]');
+    const tailStrip = tail.locator('.TS9iAW_actions');
+    const assistantDelete = tailStrip.locator('[data-ctxkit-delete="message:15"]');
+    assert.equal(await assistantDelete.count(), 1, 'the assistant delete icon is not in its matching native tail');
+    const geometry = await assistantDelete.evaluate((host) => {
+      const hostBox = host.getBoundingClientRect();
+      const buttonBox = host.shadowRoot.querySelector('button').getBoundingClientRect();
+      return { parentIsStrip: host.parentElement.classList.contains('TS9iAW_actions'),
+        hostWidth: Math.round(hostBox.width), buttonWidth: Math.round(buttonBox.width), buttonHeight: Math.round(buttonBox.height) };
+    });
+    assert.equal(geometry.parentIsStrip, true, 'the assistant action fell back into the message body');
+    assert.ok(geometry.hostWidth <= 44, `the assistant delete host stretches across the row (${geometry.hostWidth}px)`);
+    assert.deepEqual([geometry.buttonWidth, geometry.buttonHeight], [32, 32], 'the assistant delete icon is not compact');
+
+    const assertOneAssistantDelete = async (message) => assert.equal(
+      await chat.locator('[data-ctxkit-delete="message:15"]').count(), 1, message);
+    await tail.evaluate((node) => node.removeAttribute('data-chat-turn'));
+    await refresh(); await settle();
+    await assertOneAssistantDelete('a tail without a verified turn duplicated the assistant action');
+    assert.equal(await tailStrip.locator('[data-ctxkit-delete="message:15"]').count(), 0,
+      'a tail without a verified turn captured the assistant action');
+    assert.equal(await assistant.locator('[data-ctxkit-delete="message:15"]').count(), 1,
+      'an unverified tail did not use the row-local fallback');
+    assert.equal(await tailStrip.getAttribute('data-ctxkit-delete-strip'), null,
+      'the rejected native tail kept the plugin strip marker');
+
+    await tail.evaluate((node) => node.setAttribute('data-chat-turn', '15'));
+    await refresh(); await settle();
+    assert.equal(await tailStrip.locator('[data-ctxkit-delete="message:15"]').count(), 1,
+      'the assistant action did not return to a newly verified native tail');
+    await assistant.evaluate((node) => {
+      const blocker = document.createElement('div');
+      blocker.setAttribute('data-test-tail-blocker', '');
+      node.after(blocker);
+    });
+    await settle();
+    await assertOneAssistantDelete('reordering the matching tail duplicated the assistant action');
+    assert.equal(await tailStrip.locator('[data-ctxkit-delete="message:15"]').count(), 0,
+      'the stale assistant action survived in a no-longer-immediate tail');
+    assert.equal(await assistant.locator('[data-ctxkit-delete="message:15"]').count(), 1,
+      'the reordered tail did not move the action to the row-local fallback');
+    assert.equal(await tailStrip.getAttribute('data-ctxkit-delete-strip'), null,
+      'the old tail stayed hidden after its action moved away');
+    await chat.locator('[data-test-tail-blocker]').evaluate((node) => node.remove());
+    await settle();
+    await assertOneAssistantDelete('restoring the matching tail duplicated the assistant action');
+    assert.equal(await tailStrip.locator('[data-ctxkit-delete="message:15"]').count(), 1,
+      'the assistant action did not return after the matching tail became immediate again');
+
+    await page.locator('#outside-focus').hover(); await settle();
+    assert.equal(await tailStrip.evaluate((n) => getComputedStyle(n).opacity), '0', 'the destructive strip is visible at rest');
+    await assistant.hover(); await settle();
+    const pointerPaint = await chat.locator('._markdown_kcgor_5').evaluate((n) => {
+      const style = getComputedStyle(n);
+      return { outline: style.outlineStyle, shadow: style.boxShadow };
+    });
+    assert.equal(pointerPaint.outline, 'none', 'pointer hover still paints a plugin outline');
+    assert.equal(pointerPaint.shadow, 'none', 'pointer hover still paints a plugin glow');
+    assert.equal(await tailStrip.evaluate((n) => getComputedStyle(n).opacity), '1', 'assistant hover does not reveal its delete icon');
+    await tailStrip.hover(); await settle();
+    assert.equal(await tailStrip.evaluate((n) => getComputedStyle(n).opacity), '1', 'moving into the native tail hides its delete icon');
+
+    state.sessions.A.splice(0, 1);
+    await page.evaluate(() => window.dispatchEvent(new Event('dsh-context-kit:session'))); await settle();
+    const staleUserControls = await chat.locator('[data-ctxkit-unavailable], [data-ctxkit-for="8:0"], [data-ctxkit-delete="turn:8"], [data-ctxkit-delete="after:8"]')
+      .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-ctxkit-for') || node.getAttribute('data-ctxkit-delete') || 'unavailable'));
+    assert.deepEqual(staleUserControls, [], 'the unmatched user row still exposes an unavailable or destructive control');
+    assert.equal((await chat.textContent()).includes('Unavailable:'), false, 'the unmatched row still prints an unavailable warning');
+    await chat.locator('.Sixlwa_bubble').click(); await settle();
+    assert.equal(await chat.locator('[contenteditable]').count(), 0, 'the unmatched row still opens the editor');
     assert.equal(state.commits.length, 0);
   });
   for (const width of [1280, 390]) for (const kind of ['user', 'answer']) await check(`Native unified: ${kind} bounded editing and exact cancel at ${width}px`, async ({ page, chat, state, refresh, settle }) => {
@@ -443,7 +547,7 @@ try {
     // paints nothing at rest, its button is the visually-hidden keyboard path, and the thing a
     // reader clicks is the marked message text.
     assert.equal(await page.evaluate(() => document.head.querySelector('style[data-ctxkit-affordance]') !== null), true,
-      'the hover affordance must be a document rule, because the regions are the shell\'s own nodes');
+      'the keyboard affordance must be a document rule, because the regions are the shell\'s own nodes');
     for (const [name, pin] of [['thinking', thinking], ['answer', answer], ['user', user]]) {
       const resting = await pin.evaluate((n) => {
         const box = n.getBoundingClientRect(), button = n.shadowRoot.querySelector('button');
@@ -465,20 +569,24 @@ try {
       assert.ok(resting.own, `${name}: the block it edits must be one of those regions`);
       assert.equal(await pin.locator('button svg').count(), 0, `${name}: the pencil glyph must be gone`);
     }
-    // No chip in any state. Focus stays on the visually-hidden pin, so the reader sees the glow the
-    // document stylesheet puts on the marked block instead; only a coarse pointer keeps a target.
+    // No chip in any state. Focus stays on the visually-hidden pin, so the reader sees the keyboard
+    // outline on the marked block instead; only a coarse pointer keeps a target.
     const focused = await thinking.evaluate(async (n) => {
       const button = n.shadowRoot.querySelector('button');
       button.focus();
       await new Promise((resolve) => setTimeout(resolve, 60));
       const box = button.getBoundingClientRect();
-      const marked = n.parentElement?.querySelector('[data-ctxkit-edit]') ?? document.querySelector('[data-ctxkit-edit]');
-      return { width: Math.round(box.width), height: Math.round(box.height), focused: n.matches(':focus-within'), coarse: matchMedia('(pointer: coarse)').matches, glow: marked === null ? 'none' : getComputedStyle(marked).boxShadow };
+      const marked = n.regions?.[0] ?? n.parentElement?.querySelector('[data-ctxkit-edit]') ?? document.querySelector('[data-ctxkit-edit]');
+      const style = marked === null ? null : getComputedStyle(marked);
+      return { width: Math.round(box.width), height: Math.round(box.height), focused: n.matches(':focus-within'), coarse: matchMedia('(pointer: coarse)').matches,
+        outlineStyle: style?.outlineStyle ?? 'none', outlineWidth: style?.outlineWidth ?? '0px', shadow: style?.boxShadow ?? 'none' };
     });
     assert.equal(focused.focused, true, 'the pin must keep keyboard focus while it is the control');
     if (focused.coarse) assert.ok(focused.width >= 44 && focused.height >= 44, `the coarse-pointer pin must keep a touch target (got ${focused.width}x${focused.height})`);
     else assert.ok(focused.width <= 1 && focused.height <= 1, `the pin must never paint a chip for a fine pointer (got ${focused.width}x${focused.height})`);
-    assert.notEqual(focused.glow, 'none', 'the marked block must carry the focus glow the chip no longer paints');
+    assert.equal(focused.outlineStyle, 'solid', 'the marked block lost its keyboard focus outline');
+    assert.equal(focused.outlineWidth, '2px', 'the keyboard focus outline is not clearly visible');
+    assert.equal(focused.shadow, 'none', 'keyboard focus unexpectedly restored the removed glow');
     await page.screenshot({ path: join(home, `native-actions-${width}.png`) });
   }, { width, hasTouch: width === 390 });
   for (const width of [1280, 390]) await check(`Thinking in-place: same body, typography and scroll at ${width}px`, async ({ page, chat, state, refresh, settle }) => {
@@ -911,7 +1019,7 @@ try {
     assert.equal(await pin.getByRole('button', { name, exact: true, includeHidden: true }).count(), 1,
       'the accessible name must include the target and position, not just the pencil glyph');
   });
-  await check('multi-target chooser accessible name includes choose-a-block instruction', async ({ page, chat, state, refresh, settle }) => {
+  await check('multi-target chooser accessible name includes choose-a-block instruction', async ({ page, chat, row, state, refresh, settle }) => {
     state.sessions.A[1].targets.push(target(6, 'text', 'SECOND ANSWER'));
     await refresh(); await settle();
     const pin = chat.locator('[data-ctxkit-for="15"]');
@@ -938,33 +1046,30 @@ try {
     // opened an editor and that every block is on offer, rather than one of them being guessed.
     assert.ok(surfaceState.modal || surfaceState.inline === 1,
       `clicking the text of a message with more than two targets must open its editor (${JSON.stringify(chooserState)} ${JSON.stringify(surfaceState)})`);
-    const offers = await page.locator('#dsh-context-kit-editor select.target option').count();
+    const offers = await row(15).locator('select.target option').count();
     assert.equal(offers, 3, 'the chooser must offer every block instead of opening one of them');
     await page.locator('#dsh-context-kit-editor').getByRole('button', { name: 'Close', exact: true }).click(); await settle();
   });
-  await check('the glow follows the text, and the keyboard still gets a chip', async ({ page, panel, chat, settle }) => {
+  await check('pointer hover stays native while keyboard focus marks the text', async ({ page, panel, chat, settle }) => {
     assert.equal(await page.evaluate(() => matchMedia('(hover: hover)').matches), true);
     const pin = chat.locator('[data-ctxkit-for="8:0"]');
     const button = pin.locator('button');
     const region = chat.locator('.Sixlwa_bubble');
     assert.equal(await pin.evaluate(n => getComputedStyle(n).opacity), '1');
-    // THE GLOW IS THE AFFORDANCE NOW, AND IT SITS ON THE TEXT. A real pointer over the marked
-    // region must paint the ring and halo that say "click and you are editing", and leaving must
-    // take them away. Before this redesign the glow lived on a chip, so a plain hover on the text
-    // is the falsification.
+    // Pointer hover belongs to the shell. A real pointer over the marked region must not add a
+    // second ring or halo; keyboard focus remains the explicit plugin affordance.
     const paint = () => region.evaluate(n => {
       const style = getComputedStyle(n);
       return { outline: style.outlineStyle + ' ' + style.outlineWidth, shadow: style.boxShadow };
     });
     await page.mouse.move(0, 0); await settle();
-    assert.deepEqual(await paint(), { outline: 'none 0px', shadow: 'none' }, 'resting text must not glow');
+    assert.deepEqual(await paint(), { outline: 'none 0px', shadow: 'none' }, 'resting text has plugin paint');
     await region.hover(); await settle();
-    const hovered = await paint();
-    assert.match(hovered.outline, /solid 2px/u, `the hovered text must take a ring, got: ${JSON.stringify(hovered)}`);
-    assert.match(hovered.shadow, /14px 3px/u, `the hovered text must take a halo, got: ${JSON.stringify(hovered)}`);
+    assert.deepEqual(await paint(), { outline: 'none 0px', shadow: 'none' },
+      'pointer hover adds a second outline or glow to the shell');
     assert.equal(await pin.evaluate(n => getComputedStyle(n).opacity), '1');
     await panel.locator('.launch').hover(); await settle();
-    assert.deepEqual(await paint(), { outline: 'none 0px', shadow: 'none' }, 'the glow must leave with the pointer');
+    assert.deepEqual(await paint(), { outline: 'none 0px', shadow: 'none' }, 'moving the pointer changed plugin paint');
     assert.equal(await pin.evaluate(n => n.style.opacity), '1');
     assert.equal(await pin.evaluate(n => getComputedStyle(n).opacity), '1');
     // The collapsed chip is not dead: focusing it keeps the reader's affordance on the text itself,
@@ -976,7 +1081,7 @@ try {
     assert.ok(shown.width <= 1 && shown.height <= 1, `the focused pin must stay collapsed (got ${shown.width}x${shown.height})`);
     const focused = await paint();
     assert.match(focused.outline, /solid 2px/u, `keyboard focus must ring the marked text, got: ${JSON.stringify(focused)}`);
-    assert.match(focused.shadow, /14px 3px/u, `keyboard focus must halo the marked text, got: ${JSON.stringify(focused)}`);
+    assert.equal(focused.shadow, 'none', `keyboard focus must not restore the removed halo: ${JSON.stringify(focused)}`);
     assert.equal(await pin.evaluate(n => getComputedStyle(n).opacity), '1',
       'keyboard focus must override the opacity left by mouseleave');
     await page.keyboard.press('Tab'); await settle();
@@ -1357,9 +1462,9 @@ try {
     assert.equal(await page.evaluate(() => window.removedRow.querySelector('.other_markdown').style.display), '');
     assert.equal(await page.evaluate(() => window.removedRow.querySelectorAll('[data-ctxkit-projection], [data-ctxkit-pencil]').length), 0);
   });
-  await check('B1/B5: same-shape focus refresh, session drafts and list/save/status races', async ({ page, panel, row, chat, open, state, refresh, settle, switchSession, hold }) => {
+  await check('B1/B5: same-shape focus refresh, session drafts and list/save races', async ({ page, panel, row, chat, open, state, refresh, focusRefresh, settle, switchSession, hold }) => {
     await open(15); await row(15).locator('textarea').fill('PRESERVED DRAFT');
-    const oldList = hold('list'); await refresh(); await oldList.started;
+    const oldList = hold('list'); await focusRefresh(); await oldList.started;
     await switchSession('B'); oldList.release(); await settle();
     assert.equal(await panel.locator('textarea:visible').count(), 0);
     assert.match(await row(15).locator('.text').innerText(), /SESSION B/);
@@ -1375,10 +1480,10 @@ try {
     await switchSession('B'); oldSave.release(); await settle();
     assert.doesNotMatch(await panel.locator('footer').innerText(), /Saved|answer.*next request/i);
     assert.equal(await row(15).locator('.text').innerText(), 'SESSION B');
-    state.statuses.B = { enabled: false, messages: 999 };
-    const oldStatus = hold('status', 'B'); await panel.locator('header .x').click(); await panel.locator('.launch').click(); await oldStatus.started;
-    await switchSession('A'); oldStatus.release(); await settle();
-    assert.doesNotMatch(await panel.locator('footer').innerText(), /disabled|999/);
+    state.sessions.B[0].targets[0].text = 'LATE B'; state.sessions.B[0].text = 'LATE B';
+    const oldForeground = hold('list', 'B'); await panel.locator('header .x').click(); await panel.locator('.launch').click(); await oldForeground.started;
+    await switchSession('A'); oldForeground.release(); await settle();
+    assert.doesNotMatch(await row(15).locator('.text').innerText(), /LATE B/);
   });
   await check('stale refusal retains draft; unedited targets have no edited badge', async ({ page, panel, row, chat, state, open }) => {
     assert.equal(await chat.locator('[data-ctxkit-projection]').count(), 0);

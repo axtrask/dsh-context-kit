@@ -630,9 +630,10 @@ ok('the Host answers six methods while the editor surface invokes LIST instead o
   assert.deepEqual(Object.keys(EDIT_METHODS).sort(), ['commit', 'deleteMessage', 'deleteTurn', 'list', 'status', 'truncateAfter']);
 });
 
-ok('the panel refuses nothing silently: refusals are shown as text', () => {
+ok('the transcript omits unavailable markers while refused saves retain panel feedback', () => {
   const out = injectEditor(PAGE);
-  assert.ok(out.includes('Unavailable: '), 'a refused message would render without an explanation');
+  assert.ok(!out.includes("status.textContent = 'Unavailable: '"), 'the transcript still renders an unavailable warning');
+  assert.ok(!out.includes('data-ctxkit-unavailable'), 'the obsolete transcript unavailable marker survived');
   assert.ok(out.includes('Not saved.'), 'a refused save would render without feedback');
 });
 
@@ -1112,7 +1113,7 @@ ok('the decorator hides only the exact assistant row for a delete-message tombst
   };
   const { STATE, HIDDEN_TURN_ATTR, decorateTranscript } = panelConsts(injectEditor(PAGE), [
     'STATE', 'FLOW_SELECTOR', 'HIDDEN_TURN_ATTR', 'flowBody', 'messageIdOf', 'turnOf', 'stepPrefix', 'stepOf',
-    'entryFor', 'targetOf', 'deletedTurnsOf', 'deletedEntryFor', 'projections', 'pinnedRows', 'unavailableRows',
+    'entryFor', 'targetOf', 'deletedTurnsOf', 'deletedEntryFor', 'projections', 'pinnedRows',
     'rowOwners', 'hiddenRows', 'setDeletedVisibility', 'decorateTranscript'
   ], [
     'const document = globalThis.__ctxkitHiddenDocument;',
@@ -1164,39 +1165,38 @@ ok('deleted-row markers are reversible without touching native visibility or DOM
   assert.equal(native.getAttribute(HIDDEN_TURN_ATTR), 'native', 'a pre-existing native marker was clobbered');
 });
 
-ok('nested editable regions paint one deepest hover outline and share their mark safely', () => {
+ok('editable regions leave pointer hover native while keeping keyboard focus visible', () => {
   const head = fakeElement('head');
   head.querySelector = (selector) => head.children.find((child) => child.tagName === 'STYLE'
     && selector === 'style[data-ctxkit-affordance]' && child.hasAttribute('data-ctxkit-affordance')) || null;
   globalThis.__ctxkitAffordanceDocument = { head, createElement: (tag) => fakeElement(tag) };
   const { EDIT_ATTR, AFFORDANCE_ATTR, DELETE_REGION_ATTR, DELETE_STRIP_ATTR, installAffordance, markRegion, unmarkRegion, pinAt } = panelConsts(injectEditor(PAGE), [
-    'PENCIL_ATTR', 'DELETE_REGION_ATTR', 'DELETE_STRIP_ATTR', 'HIDDEN_TURN_ATTR', 'EDIT_ATTR', 'AFFORDANCE_ATTR', 'installAffordance',
+    'FLOW_SELECTOR', 'PENCIL_ATTR', 'DELETE_REGION_ATTR', 'DELETE_STRIP_ATTR', 'HIDDEN_TURN_ATTR', 'EDIT_ATTR', 'AFFORDANCE_ATTR', 'installAffordance',
     'regionOwners', 'markRegion', 'unmarkRegion', 'pinAt'
   ], 'const document = globalThis.__ctxkitAffordanceDocument;');
   installAffordance();
   installAffordance();
   const styles = globalThis.__ctxkitAffordanceDocument.head.children
     .filter((child) => child.getAttribute(AFFORDANCE_ATTR) !== null);
-  assert.equal(styles.length, 1, 'the hover stylesheet was installed twice');
-  const hover = styles[0].textContent.split('\n')[0];
-  assert.match(hover, /^\[data-ctxkit-edit\]:hover:not\(:has\(\[data-ctxkit-edit\]:hover\)\)/u,
-    'an outer marked wrapper can still paint behind its hovered child');
-  assert.equal((hover.match(/outline:/gu) || []).length, 1, 'the hover winner paints more than one outline');
-  assert.match(hover, /outline: 1px solid var\(--dsw-alias-border-l2\)/u,
-    'the hover outline is still brighter than a normal strong border');
-  assert.match(hover, /box-shadow: 0 0 12px color-mix\(in srgb, var\(--dsw-alias-border-l2\) 35%, transparent\)/u,
-    'the dim hover glow is missing');
-  assert.doesNotMatch(hover, /studio-accent|brand-primary|#[0-9a-f]/iu,
-    'the hover outline still uses a bright accent');
-  assert.doesNotMatch(styles[0].textContent, /\[data-ctxkit-edit\]:hover\s*\{/u,
-    'a generic parent hover painter bypasses the deepest-only rule');
+  assert.equal(styles.length, 1, 'the affordance stylesheet was installed twice');
+  const affordance = styles[0].textContent;
+  assert.doesNotMatch(affordance, /\[data-ctxkit-edit\]:hover/u,
+    'the plugin still paints a second pointer-hover outline');
+  assert.doesNotMatch(affordance, /box-shadow/u, 'the plugin still adds a pointer-hover glow');
+  assert.match(affordance,
+    /\[data-chat-flow\] > \[data-chat-flow-key\]:has\(\[data-ctxkit-pencil\]:focus-within\) \[data-ctxkit-edit\] \{ outline: 2px solid/u,
+    'keyboard focus no longer identifies the editable region from a native action strip');
   assert.match(
     styles[0].textContent,
     new RegExp('\\[' + DELETE_STRIP_ATTR + '\\]\\s*\\{[^}]*opacity:\\s*0\\s*!important', 'u'),
     'delete controls inside the native action strip are visible outside hover'
   );
-  assert.match(styles[0].textContent, new RegExp('\\[' + DELETE_REGION_ATTR + '\\]:hover \\[' + DELETE_STRIP_ATTR + '\\]', 'u'),
+  assert.match(affordance, new RegExp('\\[' + DELETE_REGION_ATTR + '\\]:hover \\[' + DELETE_STRIP_ATTR + '\\]', 'u'),
     'hovering a deletable row does not reveal its native action strip');
+  assert.match(affordance, new RegExp('\\[' + DELETE_REGION_ATTR + '\\]:hover \\+ \\[data-chat-flow-kind="turn-tail"\\] \\[' + DELETE_STRIP_ATTR + '\\]', 'u'),
+    'hovering an assistant row does not reveal the following native action strip');
+  assert.match(affordance, new RegExp('\\[data-chat-flow-kind="turn-tail"\\]:hover \\[' + DELETE_STRIP_ATTR + '\\]', 'u'),
+    'moving into the assistant action tail hides the destructive control');
 
   const shared = fakeElement('div');
   markRegion(shared);
@@ -1226,7 +1226,7 @@ ok('a direct human row keeps distinct delete-turn and truncate-after actions wit
     createElementNS: (_namespace, tag) => fakeElement(tag)
   };
   const { placeDeleteAction } = panelConsts(injectEditor(PAGE), [
-    'canDeleteTurn', 'canDeleteMessage', 'placeDeleteAction'
+    'deleteHosts', 'canDeleteTurn', 'canDeleteMessage', 'placeDeleteAction'
   ], [
     'const document = globalThis.__ctxkitDeleteDocument;',
     'const DELETE_ACTION_ATTR = "data-ctxkit-delete";',
@@ -1237,6 +1237,8 @@ ok('a direct human row keeps distinct delete-turn and truncate-after actions wit
     'const requestTruncateAfter = (entry, control) => globalThis.__ctxkitDeleteAction.calls.push(["after", entry, control]);',
     'const requestMessageDeletion = () => {};',
     'const userActionStrip = (node) => node;',
+    'const assistantActionStrip = () => null;',
+    'const releaseDeleteStrip = (strip) => { if (strip && strip.querySelector("[" + DELETE_ACTION_ATTR + "]") === null) strip.removeAttribute(DELETE_STRIP_ATTR); };',
     'const textLayout = () => ({ containers: [], thinks: [] });'
   ].join('\n'));
   const row = fakeElement('article');
@@ -1268,7 +1270,7 @@ ok('an unmatched visible user row does not expose unusable destructive controls'
     createElementNS: (_namespace, tag) => fakeElement(tag)
   };
   const { STATE, placeDeleteAction } = panelConsts(injectEditor(PAGE), [
-    'STATE', 'canDeleteTurn', 'canDeleteMessage', 'placeDeleteAction'
+    'STATE', 'deleteHosts', 'canDeleteTurn', 'canDeleteMessage', 'placeDeleteAction'
   ], [
     'const document = globalThis.__ctxkitUnavailableActionDocument;',
     'const DELETE_ACTION_ATTR = "data-ctxkit-delete";',
@@ -1279,6 +1281,8 @@ ok('an unmatched visible user row does not expose unusable destructive controls'
     'const requestTruncateAfter = () => { throw Error("disabled action ran"); };',
     'const requestMessageDeletion = () => { throw Error("disabled action ran"); };',
     'const userActionStrip = (node) => node;',
+    'const assistantActionStrip = () => null;',
+    'const releaseDeleteStrip = (strip) => { if (strip && strip.querySelector("[" + DELETE_ACTION_ATTR + "]") === null) strip.removeAttribute(DELETE_STRIP_ATTR); };',
     'const textLayout = () => ({ containers: [], thinks: [] });'
   ].join('\n'));
   const row = fakeElement('article');
@@ -1297,14 +1301,14 @@ ok('an unmatched visible user row does not expose unusable destructive controls'
   delete globalThis.__ctxkitUnavailableActionDocument;
 });
 
-ok('an assistant row keeps one exact delete-message action and wires its callback', () => {
+ok('an assistant row puts one exact delete-message action in its matching native tail strip', () => {
   globalThis.__ctxkitDeleteAction = { calls: [] };
   globalThis.__ctxkitDeleteDocument = {
     createElement: (tag) => fakeElement(tag),
     createElementNS: (_namespace, tag) => fakeElement(tag)
   };
   const { placeDeleteAction } = panelConsts(injectEditor(PAGE), [
-    'canDeleteTurn', 'canDeleteMessage', 'placeDeleteAction'
+    'deleteHosts', 'canDeleteTurn', 'canDeleteMessage', 'placeDeleteAction'
   ], [
     'const document = globalThis.__ctxkitDeleteDocument;',
     'const DELETE_ACTION_ATTR = "data-ctxkit-delete";',
@@ -1314,16 +1318,24 @@ ok('an assistant row keeps one exact delete-message action and wires its callbac
     'const requestTurnDeletion = () => { throw Error("assistant action called deleteTurn"); };',
     'const requestMessageDeletion = (entry, control) => globalThis.__ctxkitDeleteAction.calls.push([entry, control]);',
     'const userActionStrip = () => null;',
+    'const assistantActionStrip = () => globalThis.__ctxkitDeleteAction.strip;',
+    'const releaseDeleteStrip = (strip) => { if (strip && strip.querySelector("[" + DELETE_ACTION_ATTR + "]") === null) strip.removeAttribute(DELETE_STRIP_ATTR); };',
     'const textLayout = () => ({ containers: [], thinks: [] });'
   ].join('\n'));
   const row = fakeElement('article');
+  const strip = fakeElement('div');
+  globalThis.__ctxkitDeleteAction.strip = strip;
   const entry = { type: 'assistant/message', seq: 18, id: 'reply-18', turn: 3, step: 2 };
   placeDeleteAction(row, entry);
-  const first = row.querySelector('[data-ctxkit-delete]');
+  const first = strip.querySelector('[data-ctxkit-delete]');
   placeDeleteAction(row, entry);
-  assert.equal(row.querySelectorAll('[data-ctxkit-delete]').length, 1, 'a second decoration duplicated Delete message');
-  assert.equal(row.querySelector('[data-ctxkit-delete]'), first, 'a stable assistant delete action was replaced');
+  assert.equal(strip.querySelectorAll('[data-ctxkit-delete]').length, 1, 'a second decoration duplicated Delete message');
+  assert.equal(strip.querySelector('[data-ctxkit-delete]'), first, 'a stable assistant delete action was replaced');
   assert.equal(first.getAttribute('data-ctxkit-delete'), 'message:18');
+  assert.equal(first.parentNode, strip, 'the assistant delete action fell back into the wide message row');
+  assert.equal(first.ownerRow, row, 'the tail-hosted action lost ownership of its assistant row');
+  assert.ok(first.hasAttribute('data-native-strip'), 'the tail-hosted action is internally hidden inside the native strip');
+  assert.ok(strip.hasAttribute('data-ctxkit-delete-strip'), 'the matching native action strip was not marked');
   assert.ok(row.hasAttribute('data-ctxkit-delete-region'), 'the deletable row is not marked as the hover region');
   const style = first.shadowRoot.children.find((child) => child.tagName === 'STYLE');
   assert.match(style.textContent, /:host\{display:inline-flex;[^}]*opacity:0;pointer-events:none/u,
@@ -1348,6 +1360,10 @@ ok('an assistant row keeps one exact delete-message action and wires its callbac
   assert.equal(globalThis.__ctxkitDeleteAction.calls.length, 1, 'the assistant action did not request message deletion');
   assert.equal(globalThis.__ctxkitDeleteAction.calls[0][0], entry);
   assert.equal(globalThis.__ctxkitDeleteAction.calls[0][1], button);
+  placeDeleteAction(row, undefined);
+  assert.equal(strip.querySelector('[data-ctxkit-delete]'), null, 'an ineligible assistant action survived in the tail');
+  assert.equal(strip.hasAttribute('data-ctxkit-delete-strip'), false, 'an empty native tail stayed hidden by the plugin');
+  assert.equal(row.hasAttribute('data-ctxkit-delete-region'), false, 'an ineligible assistant row kept hover ownership');
   delete globalThis.__ctxkitDeleteAction;
   delete globalThis.__ctxkitDeleteDocument;
 });
@@ -2320,7 +2336,7 @@ ok('a signed thinking and the answer beside it are both editable', () => {
   assert.deepEqual(shown.targets.map((target) => target.reason), [undefined, undefined]);
 });
 
-ok('signed thinking stays visually quiet while redacted thinking stays visible and refused', () => {
+ok('signed thinking stays quiet and redacted thinking has no transcript control', () => {
   const { badgeText, pinTargets } = panelConsts(injectEditor(PAGE), ['badgeText', 'targetsOf', 'fallbackTarget', 'pinTargets']);
   const signed = panelEntry(replyEntry([blockReasoning('SIGNED THINKING')], { source: signedSource })).targets[0];
   assert.equal(badgeText(signed), '', 'signed thinking leaked a conversion warning into the transcript');
@@ -2329,8 +2345,8 @@ ok('signed thinking stays visually quiet while redacted thinking stays visible a
   assert.equal(shown.targets.length, 1, 'redacted thinking disappeared from the target list');
   assert.equal(shown.targets[0].editable, false, 'redacted provider state became editable');
   assert.match(shown.targets[0].reason, /cannot be rewritten/u);
-  assert.deepEqual(pinTargets(shown), [{ ...shown.targets[0], unavailable: true }],
-    'the transcript silently filtered the refused target instead of explaining it');
+  assert.deepEqual(pinTargets(shown), [],
+    'the transcript exposed a dead control for a refused target');
   assert.ok(SCRIPT.includes("option.disabled = target.editable === false"),
     'the panel picker does not render refused targets as disabled choices');
   assert.ok(SCRIPT.includes("unavailableNote.className = 'why err'"),
@@ -2339,24 +2355,8 @@ ok('signed thinking stays visually quiet while redacted thinking stays visible a
     'an uneditable projection can still expose Copy');
   assert.ok(SCRIPT.includes("item.target.editable === false || ['refused', 'mixed'].includes(item.target.editStatus)"),
     'an unavailable projection is not styled as refused');
-
-  globalThis.__ctxkitUnavailableDocument = { createElement: (tag) => fakeElement(tag) };
-  const { PENCIL_ATTR, addPencil } = panelConsts(SCRIPT, ['PENCIL_ATTR', 'pinCss', 'keyOf', 'addPencil'],
-    'const document = globalThis.__ctxkitUnavailableDocument;');
-  const row = fakeElement('article');
-  const pin = addPencil(row, { seq: 9 }, { ...shown.targets[0], unavailable: true });
-  assert.equal(pin.hasAttribute(PENCIL_ATTR), false, 'a refused target is still marked as a clickable edit affordance');
-  assert.equal(pin.hasAttribute('data-ctxkit-unavailable'), true);
-  assert.deepEqual(pin.regions, [], 'a refused target still owns clickable native regions');
-  const status = pin.shadowRoot.children.find((child) => child.getAttribute?.('role') === 'status');
-  assert.ok(status, 'the unavailable marker is not a permanent status');
-  assert.equal(status.textContent, 'Unavailable: ' + shown.targets[0].reason);
-  assert.equal(pin.shadowRoot.children.some((child) => child.tagName === 'BUTTON'), false,
-    'the unavailable status still presents itself as an edit button');
-  const unavailableStyle = pin.shadowRoot.children.find((child) => child.tagName === 'STYLE').textContent;
-  assert.match(unavailableStyle, /:host\(\[data-unavailable\]\) \{ display: inline-flex; width: auto; height: auto/u,
-    'the unavailable status is still clipped to one pixel');
-  delete globalThis.__ctxkitUnavailableDocument;
+  assert.ok(!SCRIPT.includes('data-ctxkit-unavailable') && !SCRIPT.includes("status.textContent = 'Unavailable: '"),
+    'the refused target can still leak an unavailable marker into the transcript');
 });
 
 ok('the rule asked about the DEFAULT block is the rule with no block at all', () => {
@@ -2528,7 +2528,7 @@ ok('a row draws one pencil per editable target, keyed by seq and block', () => {
     'flowBody', 'messageIdOf', 'turnOf', 'stepPrefix', 'stepOf', 'pinCss', 'parseKey', 'keyOf',
     'pointed', 'pointerOnce', 'pointerEdit', 'pinAt', 'INNER_CONTROL', 'GESTURE_GRACE',
     'hovered', 'hoverOnce', 'addPencil', 'entryFor', 'targetOf', 'deletedTurnsOf', 'deletedEntryFor', 'pinTargets', 'sameTarget',
-    'projections', 'pinnedRows', 'unavailableRows', 'rowOwners', 'decorateTranscript'
+    'projections', 'pinnedRows', 'rowOwners', 'decorateTranscript'
   ], [
     'const document = globalThis.__ctxkitDocument;',
     'const installAffordance = () => {}; const setDeletedVisibility = () => {};',
@@ -2557,22 +2557,24 @@ ok('a row draws one pencil per editable target, keyed by seq and block', () => {
     'the chip must be its label alone; the pencil glyph must not come back');
   // FALSIFICATION OF THE VISIBLE CHIP, whatever shape it takes - first a label row below the
   // block, then a labelled chip seated on its corner, and in both the pointer was the chip. The
-  // pin must now paint nothing at rest, the message text must be the way in, and the glow must
-  // live on that text. These live here rather than in the stylesheet check above because that
+  // pin must now paint nothing at rest, the message text must be the way in, and only keyboard
+  // focus may add a plugin outline. These live here rather than in the stylesheet check above because that
   // check is already red on an unrelated rule and never reaches its tail.
   assert.ok(!SCRIPT.includes('PLANT_ATTR') && !SCRIPT.includes('plantLift'), 'the seated-chip placement is back');
   assert.ok(pinCss.includes('clip-path: inset(50%)'), 'the resting chip must collapse to the visually-hidden square');
-  assert.ok(!pinCss.includes(':host(:hover) button'), 'the glow must not sit on the chip any more');
+  assert.ok(!pinCss.includes(':host(:hover) button'), 'pointer hover must not paint the chip');
   assert.ok(SCRIPT.includes('pointerEdit'), 'the message text must be the pointer path');
   assert.ok(SCRIPT.includes('pin.open = open'), 'the text click and the button must share one action');
   assert.ok(SCRIPT.includes("a, button, input, textarea, select, summary, code, pre"),
     'a link, code or control inside the text must stay the shell\'s');
   assert.ok(SCRIPT.includes('isCollapsed === false'), 'a click made while text is selected must not open the editor');
   assert.ok(SCRIPT.includes('event.button !== 0'), 'a right click must not open the editor');
-  assert.ok(SCRIPT.includes('data-ctxkit-affordance') && SCRIPT.includes("'[' + EDIT_ATTR + ']:hover"),
-    'the hover glow must be a document rule on the marked regions');
-  assert.ok(SCRIPT.includes('data-ctxkit-edit'), 'the editable regions must be marked for that rule');
-  assert.ok(SCRIPT.includes('var(--dsw-alias-brand-primary'), 'the glow must use the brand token, not a new palette');
+  assert.ok(SCRIPT.includes('data-ctxkit-affordance') && !SCRIPT.includes("'[' + EDIT_ATTR + ']:hover"),
+    'the plugin still owns pointer-hover paint');
+  assert.ok(SCRIPT.includes("FLOW_SELECTOR + ':has([' + PENCIL_ATTR + ']:focus-within) [' + EDIT_ATTR + ']"),
+    'the marked region lost its keyboard focus outline when its pin moved into a native action strip');
+  assert.ok(SCRIPT.includes('data-ctxkit-edit'), 'the editable regions must remain marked for clicks and focus');
+  assert.ok(SCRIPT.includes('var(--dsw-alias-brand-primary'), 'keyboard focus must use a theme token, not a new palette');
   assert.ok(pinCss.includes('min-height: 44px; min-width: 44px;'), 'the focused chip must keep its touch size');
   assert.ok(SCRIPT.includes("button.textContent = 'Edit '"), 'the chip must be its own label, not an icon plus a label');
   assert.ok(!SCRIPT.includes('button.innerHTML'), 'the removed pencil glyph markup is back');
@@ -2648,7 +2650,7 @@ ok('signed thinking receives the same per-block pencil as unsigned thinking', ()
     'flowBody', 'messageIdOf', 'turnOf', 'stepPrefix', 'stepOf', 'pinCss', 'parseKey', 'keyOf',
     'pointed', 'pointerOnce', 'pointerEdit', 'pinAt', 'INNER_CONTROL', 'GESTURE_GRACE',
     'hovered', 'hoverOnce', 'addPencil', 'entryFor', 'targetOf', 'deletedTurnsOf', 'deletedEntryFor', 'pinTargets', 'sameTarget',
-    'projections', 'pinnedRows', 'unavailableRows', 'rowOwners', 'decorateTranscript'
+    'projections', 'pinnedRows', 'rowOwners', 'decorateTranscript'
   ], [
     'const document = globalThis.__ctxkitDocument;',
     'const installAffordance = () => {}; const setDeletedVisibility = () => {};',
