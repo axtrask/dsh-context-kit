@@ -220,6 +220,54 @@ ok('both served stylesheets keep their rules and browser escape layers', () => {
   assert.ok(pinCss.startsWith(':host { position: relative; display: flex;'));
   assert.ok(pinCss.includes('min-height: 44px; min-width: 44px;'));
   assert.ok(!/position:\s*(sticky|fixed|absolute)/.test(pinCss), 'editor actions must stay in flow below their block');
+  assert.match(pinCss, /:host\(\[data-editing\]\) \{[^}]*background: transparent;[^}]*box-shadow: none;/u,
+    'the inline actions still paint the detached white pill');
+  assert.ok(!pinCss.includes('var(--studio-panel') && !pinCss.includes('var(--studio-shadow'),
+    'the inline actions still depend on the legacy surface palette');
+  assert.match(css, /\.save:not\(\.accept\), \.cancel \{[^}]*width: 28px;[^}]*height: 28px;[^}]*background: transparent;/u,
+    'Save and Cancel do not match the native icon-only action size');
+  assert.match(css, /header \.x \{ width: 28px; height: 28px;[^}]*padding: 6px; border: 0;/u,
+    'the panel close icon does not match the native icon-only action size');
+  assert.match(css, /\.notice button \{[^}]*width: 28px; height: 28px;[^}]*background: transparent;/u,
+    'the notification close icon does not match the native icon-only action size');
+  assert.ok(css.includes('.save:not(.accept), .cancel, header .x, .notice button { width: 44px; height: 44px; min-width: 44px; min-height: 44px; }'),
+    'icon-only controls lose their 44px targets on coarse pointers');
+  assert.ok(SCRIPT.includes('.acts .save:not(.accept),.acts .cancel{width:44px;height:44px;min-width:44px;min-height:44px}'),
+    'inline Save and Cancel lose their 44px targets on coarse pointers');
+  assert.ok(css.includes('.save:disabled:not(.accept) { width: auto; min-width: 0; padding: 4px 10px; }')
+    && SCRIPT.includes('.acts .save:disabled:not(.accept){width:auto;min-width:0;padding:4px 10px}'),
+    'the live Saving label is constrained to the resting icon width');
+  assert.match(css, /\.save \{[^}]*color: var\(--dsw-alias-brand-primary/u,
+    'Save does not use the CDSH brand token');
+  assert.match(css, /\.cancel \{[^}]*color: var\(--dsw-alias-label-secondary/u,
+    'Cancel does not use the CDSH secondary-label token');
+  assert.ok(css.includes('background: var(--dsw-alias-bg-layer-2'),
+    'notices still fall back to a light surface in the dark CDSH theme');
+});
+
+ok('icon controls expose their name and hide only the drawing', () => {
+  globalThis.__ctxkitIconDocument = {
+    createElementNS: (_namespace, tag) => fakeElement(tag)
+  };
+  const { icon, CHECK_PATH, CROSS_PATH } = panelConsts(SCRIPT, ['icon', 'CHECK_PATH', 'CROSS_PATH'],
+    'const document = globalThis.__ctxkitIconDocument;');
+  for (const [name, path] of [['Save', CHECK_PATH], ['Close', CROSS_PATH]]) {
+    const button = fakeElement('button');
+    button.textContent = 'old label';
+    assert.equal(icon(button, name, path), button, 'icon must decorate the original button');
+    assert.equal(button.textContent, '', 'the visible word was not removed');
+    assert.equal(button.getAttribute('aria-label'), name, 'the button lost its accessible name');
+    assert.equal(button.children.length, 1, 'the button must contain exactly one drawing');
+    const svg = button.children[0];
+    assert.equal(svg.tagName, 'SVG');
+    assert.equal(svg.getAttribute('aria-hidden'), 'true', 'assistive technology must ignore the drawing');
+    assert.equal(svg.getAttribute('focusable'), 'false', 'the drawing must not become a second focus target');
+    assert.equal(svg.getAttribute('fill'), 'none');
+    assert.equal(svg.getAttribute('stroke'), 'currentColor');
+    assert.equal(svg.getAttribute('stroke-width'), '1.4');
+    assert.equal(svg.children[0]?.getAttribute('d'), path, 'the wrong glyph was drawn');
+  }
+  delete globalThis.__ctxkitIconDocument;
 });
 
 ok('the script calls the channel the server registers', () => {
@@ -2009,8 +2057,14 @@ ok('a row draws one pencil per editable target, keyed by seq and block', () => {
   assert.ok(!SCRIPT.includes("save.textContent = 'Save'") && !SCRIPT.includes("cancel.textContent = 'Cancel'"),
     'the old Save/Cancel words are back');
   assert.ok(SCRIPT.includes("save.textContent = 'Saving...'"), 'the busy word must survive the icons');
+  assert.ok(SCRIPT.includes("save.setAttribute('aria-label', 'Saving...')"),
+    'the busy button must announce Saving rather than keep its resting Save name');
   assert.ok(SCRIPT.includes("icon(save, 'Save', CHECK_PATH)"), 'Save must be a checkmark');
   assert.ok(SCRIPT.includes("icon(cancel, 'Cancel', CROSS_PATH)"), 'Cancel must be a cross');
+  assert.ok(SCRIPT.includes("icon(wrap.querySelector('header .x'), 'Close', CROSS_PATH)"),
+    'the panel close action must be an icon rather than visible text');
+  assert.ok(SCRIPT.includes("icon(dismissNotice, 'Dismiss notification', CROSS_PATH)"),
+    'the notification dismiss action must be an icon rather than visible text');
   assert.ok(SCRIPT.includes("svg.setAttribute('stroke-width', '1.4')") && SCRIPT.includes("svg.setAttribute('fill', 'none')"),
     'the drawn controls must follow the plugin stroke style');
   // WHICH TARGET each pencil is for is in its tooltip, and the click carries the block.
