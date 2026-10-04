@@ -1,9 +1,32 @@
-# Chat-history editor: the interface button (current work)
+# Chat-history editor: interface contract
 
-Historical implementation notes. The current effective-text projection, B1-B6
-fixes, tab-local client bridge and verification scope are documented in
-[Effective Editor View](editor-effective-view.md). Earlier route and client-loader
-claims below describe the investigation at the time, not the current contract.
+## Current behavior
+
+- Each transcript row exposes a permanently visible action strip. Available actions have
+  readable labels; refused actions stay visible but disabled and explain why they are unsafe.
+- Eligible user, assistant, tool-call, tool-result, and reasoning text blocks can be edited or
+  deleted without implicitly removing the following history. Assistant tool blocks use the wire
+  overlay; host `tool/result` events use a durable content-only replacement that preserves the
+  envelope, message metadata, and call pairing. Signed visible reasoning is converted to ordinary
+  provider-neutral text and loses every stale signature, including replay-state signatures.
+  Opaque or redacted reasoning remains permanently visible as unavailable and cannot be selected.
+- Every direct human message has **Hide all history after this message**. Its confirmation states
+  that the selected user message is retained and only later history is hidden. The other
+  destructive labels are **Delete turn** and **Delete reply**, so their scopes are not represented
+  by icons alone.
+- Mutations are disabled while generation is active and are also rejected by the server if a
+  stale or modified client submits one. `editor.requireIdle: false` is accepted only as legacy
+  configuration; it never disables this guard.
+- Refreshes share one list request per generation. A newer refresh invalidates the previous
+  generation, and stale responses cannot replace the current panel state. The server builds one
+  raw editable index and reuses it for the effective projection.
+- Destructive success moves focus to a stable control before reloading the transcript. This
+  avoids leaving keyboard focus inside a row that has just been removed.
+
+Historical implementation notes follow. The effective-text projection, B1-B6 fixes,
+tab-local client bridge, and verification scope are also documented in
+[Effective Editor View](editor-effective-view.md). Earlier route and client-loader claims below
+describe the investigation at the time, not the current contract.
 
 Written 2026-09-13, at the point where the durable editor works but the user still has to
 type a command. **The user's actual requirement, in their words:**
@@ -80,13 +103,11 @@ reaching the provider with the tail untouched).
   `findAnchoredIndex`, `planWireRewrite`, `installWireOverlay`, edit store with JSON
   persistence under `$DSH_HOME/context-kit/edits/<sessionId>.json`. An edit may only rewrite
   the text of a `text`/`tool-call`/`tool-result`/`reasoning` block and may never change the
-  block count or a `toolCallId`, so tool pairing cannot break by construction. A `reasoning`
-  block is refused when the provider holds a signature over its text
-  (`signedReasoningRefusal`: a signature on the block itself, or `thinkingSignature` in the
-  message's `source.replayState`, which is where `dsh-llm-pi-ai` keeps it) — the adapter
-  re-attaches that signature to whatever text it is handed
-  (`dsh-llm-pi-ai/lib/index.js:198-203`), so a rewrite would send a signature over different
-  thinking. DeepSeek signs nothing and its reasoning is editable.
+  block count or a `toolCallId`, so tool pairing cannot break by construction. Editing signed,
+  visible `reasoning` cannot preserve the provider proof: the replacement is therefore emitted
+  as ordinary `text` in visible and replay content, with block signatures and stale
+  `source.replayState` signature fields removed. Redacted or otherwise opaque reasoning is
+  refused because its original text is unavailable, but it remains listed with that reason.
 - `lib/edit-durable.js` — durable branch: `editableIndex` (derives the request index from the
   surface; `index` = position in the request, `userIndex` = position among user messages),
   `userMessages`, `resolveTarget`, `commitUserEdit` (dry run first, then a real
@@ -94,8 +115,9 @@ reaching the provider with the tail untouched).
   `renderEditableList`, `runEditCommand({session, agent, config, rawInput})`.
 - `/edit` is registered **unconditionally** in `lib/dcp.js` (commit `d2f86e0`) so enabling the
   feature never needs a restart; the handler refuses with an explanation while the flag is off.
-- Tests: `scripts/test-edit.mjs` (81 checks, mostly refusals), `scripts/test-edit-durable.mjs`
-  (65 checks against a real `SessionStore`, own wiped `DSH_HOME`).
+- Tests: `scripts/test-edit.mjs` (195 marked checks, mostly refusals),
+  `scripts/test-edit-durable.mjs` (173 marked checks against a real `SessionStore`, own wiped
+  `DSH_HOME`).
 - Assistant messages are **refused** by the durable path and handled by the wire overlay
   instead. The overlay is mounted by `apply` in `lib/dcp.js` and observed end to end:
   `scripts/test-edit-wire.mjs` mounts that `apply`, asserts the listener is in the root's

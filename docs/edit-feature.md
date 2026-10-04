@@ -1,7 +1,37 @@
 # Editing chat history in DSH — design and evidence
 
 The editor's release contract is guarded by `npm run test:edit-history`, which covers
-core behavior, durable state, wire behavior, GUI behavior, and GUI load order.
+core behavior, durable state, wire behavior, GUI behavior, and GUI load order. Its DOM contract
+keeps the action strip visible, keeps refused controls disabled with their explanation, verifies
+the retain-anchor confirmation text, and removes stale destructive strips when rows are recycled.
+`npm run test:publication` also checks the command argument gate and imports the packed plugin
+entry points. The optional Playwright browser check remains environment-dependent.
+
+## Current release contract
+
+- The panel exposes every text-bearing block that can be changed safely. Edit and delete
+  actions remain visible instead of appearing only on hover, and destructive operations use
+  explicit labels such as **Delete turn**, **Hide all history after this message**, and **Delete reply**.
+- Signed, non-redacted reasoning is editable. The edited block becomes ordinary `text` in
+  both the visible and replay payloads, and provider signatures and stale replay metadata are
+  removed. Opaque or redacted reasoning remains listed but disabled with an explanation because
+  text the user cannot see cannot be rewritten honestly.
+- Every direct human message offers **Hide all history after this message**. After confirmation it
+  retains that message and suppresses only the later history. Other deletion scopes preserve
+  tool-call/result pairing.
+- User-message and host `tool/result` replacements use the durable session path when the core
+  permits them; the tool result changes only `message.content`. Assistant blocks use the persisted
+  wire overlay. If a durable user replacement changes a truncate anchor, the editor journals the
+  candidate rebase, appends the session event, and only then publishes the new state. Recovery
+  completes the candidate only when the replacement is present; otherwise it keeps the old state.
+- Every server-side mutation refuses while the agent is not idle. This is unconditional: the
+  legacy `editor.requireIdle: false` setting cannot bypass the safety invariant.
+- Store mutations persist before becoming visible in memory. An empty store removes its state
+  file. Failed persistence leaves the published state unchanged.
+- A list request computes the raw session index once and derives the effective projection from
+  that snapshot. The client shares in-flight loads within one refresh generation and discards
+  stale generations, avoiding duplicate scans without allowing an old response to overwrite a
+  newer view.
 
 The requirement, in the user's words: edit the chat history **both ways** — the
 assistant's replies and the user's own messages — so that the edited text is what
@@ -49,8 +79,9 @@ portable conclusions and maintained regression probes are recorded below:
 Keeps the tail, keeps roles, durable in the log because the replacement is an ordinary
 event that flows to disk unchanged. This alone satisfies most of the request.
 
-**Built and tested** (`lib/edit-durable.js`, 74 checks in `scripts/test-edit-durable.mjs`
-against a real `SessionStore`; `/edit` sits behind `editor.enabled`, default **off**).
+**Built and tested** (`lib/edit-durable.js`, 173 marked checks in
+`scripts/test-edit-durable.mjs` against a real `SessionStore`; `/edit` sits behind
+`editor.enabled`, default **off**).
 
 Three facts that took real experiments to settle, all of which the implementation depends on:
 
@@ -71,8 +102,9 @@ Three facts that took real experiments to settle, all of which the implementatio
 
 The command has three forms, because the first two are how a person finds out what the third
 will touch: `/edit` lists the user messages, `/edit -1` previews one, `/edit -1 new text`
-commits. A running agent blocks a write unless `editor.requireIdle: false`, and the command
-runs a `dryRun` before the real append so its reply cannot describe a change that did not happen.
+commits. A running agent always blocks a write; the legacy `editor.requireIdle: false` value
+cannot bypass that invariant. The command runs a `dryRun` before the real append so its reply
+cannot describe a change that did not happen.
 
 Running the tests against a real session caught four fixture bugs of mine in one sitting —
 worth remembering before trusting a green suite: an assertion that assumed the edited message
@@ -197,21 +229,22 @@ core → fall back to the wire rewrite. Same UI, same storage; only the commit s
 
 ## 4. Implementation requirements (hard-won)
 
-1. **Never strip tool calls.** An assistant reply carrying `tool-call` blocks must keep
-   them, otherwise the paired `tool/result` is orphaned and
-   `F\dsh-compaction\lib\types\tool-pairing.js` throws
+1. **Never strip or orphan tool calls.** Editing a text-bearing `tool-call` block changes only
+   that block on the wire and preserves the call identity, while a host `tool/result` replacement
+   changes only `event.data.message.content`. The pair remains intact; malformed or unpaired
+   carriers are refused because `F\dsh-compaction\lib\types\tool-pairing.js` otherwise throws
    `tool/result at surface seq N has no matching tool-call (corrupt surface)`.
-   The editor must refuse such an edit, not attempt it.
 2. **Write `content` and `stream` coherently** on the durable path. The cross-check
    (`assertCurrentAssistantStreams`) only runs during migration, so a stale `stream`
    loads silently and any view rendered from the stream shows the pre-edit text.
 3. **Invalidate the projection cache** (`$DSH_HOME/storages/session_projcache/...`).
    Rows are keyed by seq watermark with no content digest and hold literal text, so a
    same-length edit can leave a stale session title.
-4. **Gate edits on an idle agent.** `dsh-agent-loop\invariant.js:26-27` re-derives and
-   compares the request; an edit landing between build and dispatch is a desync. That
-   invariant is not mounted in the live web profile today, so do not rely on it — gate
-   the UI instead.
+4. **Gate every mutation on an idle agent.** `dsh-agent-loop\invariant.js:26-27`
+   re-derives and compares the request; an edit landing between build and dispatch is a
+   desync. The GUI RPC and `/edit` command enforce the guard on the server, regardless of
+   the legacy `requireIdle` configuration value; the client-side disabled state is only
+   an additional affordance.
 5. **Server side** needs an RPC; there is no edit operation anywhere in the public API.
    `SessionStore` exposes only `create, prepare, enter, announce, flush, get, list, fork`
    and `Session.append` is the only surface mutator. A slash command through

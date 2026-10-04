@@ -75,19 +75,19 @@ ok('the enter column splits the line into a token and the remainder', () => {
 
 ok('a declared `input` is what claims a line that carries arguments', () => {
   assert.match(client, /if \(desc\.input !== void 0\) \{/u, 'the input gate moved');
-  assert.match(client, /return \{ claim: this\.leadingClaim\(desc, session\) \};/u, 'the claim moved');
+  assert.match(client, /return \{ claim: this\.leadingClaim\(desc, session, token\.slice\(1\)\) \};/u, 'the enter claim moved');
 });
 
 ok('WITHOUT a declared `input`, a non-bare line falls through to the model', () => {
   // Both halves matter: the guard that bails on arguments AND the absence of any
   // other claim path for a descriptor without `input`.
   assert.match(client, /if \(!bare\) return void 0;/u, 'the non-bare bail moved');
-  assert.match(client, /if \(name === ""\) return void 0;/u, 'the empty-name bail moved');
+  assert.match(client, /if \(typedName === ""\) return void 0;/u, 'the empty-name bail moved');
 });
 
-ok('the leading claim submits `token + args` so the argument is preserved', () => {
-  assert.match(client, /const token = `\/\$\{desc\.name\} `;/u, 'the leading token moved');
-  assert.match(client, /submit: \(args, _actx, attachments\) => this\.execute\(session, token \+ args, attachments\)/u, 'the submit join moved');
+ok('the leading claim submits the canonical command plus untouched args', () => {
+  assert.match(client, /const line = `\/\$\{desc\.name\} `;/u, 'the canonical command prefix moved');
+  assert.match(client, /submit: \(args, _actx, attachments\) => this\.execute\(session, line \+ args, attachments\)/u, 'the submit join moved');
 });
 
 ok('the host parser hands the untouched remainder to the handler', () => {
@@ -116,8 +116,11 @@ ok('EVERY command whose handler reads rawInput declares an input descriptor', ()
   // into a verb and a rest is meaningless without arguments, so each such registration
   // must declare `input` or its arguments become model prose.
   const registrations = [...dcp.matchAll(/commands\.register\(\{([\s\S]*?)\n {4}\}\);/gu)].map((match) => match[1]);
-  assert.ok(registrations.length >= 3, `expected the plugin's command registrations, found ${registrations.length}`);
-  const argumentReaders = registrations.filter((block) => /invocation\.rawInput|rawInput: invocation\.rawInput/u.test(block));
+  const editAt = dcp.indexOf("name: 'edit',");
+  const descriptors = [...registrations, dcp.slice(editAt, editAt + 900)];
+  assert.ok(registrations.length >= 2 && editAt >= 0,
+    `expected two inline registrations plus the /edit descriptor factory, found ${registrations.length}`);
+  const argumentReaders = descriptors.filter((block) => /invocation\.rawInput|rawInput: invocation\.rawInput/u.test(block));
   assert.ok(argumentReaders.length >= 2, `expected at least two argument-reading commands, found ${argumentReaders.length}`);
   for (const block of argumentReaders) {
     const name = /name: '([^']+)'/u.exec(block)?.[1] ?? '<unnamed>';
@@ -130,6 +133,15 @@ ok('the handler receives the whole remainder as rawInput, not a slice of it', ()
   const block = dcp.slice(at, at + 900);
   assert.match(block, /rawInput: invocation\.rawInput/u, 'rawInput is no longer the invocation value');
   assert.doesNotMatch(block, /rawInput: invocation\.rawInput\.(slice|split|trim)/u, 'the argument is being re-cut before the handler');
+});
+
+const { createEditCommandDescriptor } = await import('../lib/dcp.js');
+ok('the actual `/edit` handler closes over the mounted edit store and can execute', () => {
+  const store = { marker: 'session-local-store' };
+  const descriptor = createEditCommandDescriptor({ dcpConfig: { editor: { enabled: false } } }, store);
+  const result = descriptor.handler({ agent: { session: {}, status: 'idle' }, rawInput: '' });
+  assert.equal(result.kind, 'error');
+  assert.match(result.text, /editor is off/u);
 });
 
 console.log('falsification (the checks above must be able to fail)');

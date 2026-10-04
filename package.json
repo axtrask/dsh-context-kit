@@ -43,8 +43,8 @@
   },
   "scripts": {
     "test:metadata": "node scripts/test-bundle-metadata.mjs",
-    "test:edit-history": "node scripts/test-edit.mjs && node scripts/test-edit-durable.mjs && node scripts/test-edit-wire.mjs && node scripts/test-edit-gui.mjs && node scripts/test-edit-gui-load-order.mjs",
-    "test:publication": "npm run test:metadata && npm run test:edit-history"
+    "test:edit-history": "node scripts/test-edit.mjs && node scripts/test-edit-durable.mjs && node scripts/test-edit-wire.mjs && node scripts/test-edit-gui.mjs && node scripts/test-edit-gui-load-order.mjs && node scripts/test-edit-bridge.mjs",
+    "test:publication": "npm run test:metadata && npm run test:edit-history && node scripts/test-command-argument-gate.mjs"
   },
   "files": [
     "lib",

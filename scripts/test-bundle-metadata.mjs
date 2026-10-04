@@ -29,6 +29,8 @@ assert.equal(manifest.license, 'UNLICENSED', 'the private bundle must not invent
 assert.equal(manifest.engines?.node, '>=22.19.0');
 assert.equal(manifest.type, 'module');
 assert.equal(manifest.exports?.['.'], './lib/index.js');
+assert.equal(manifest.exports?.['./editor-plugin'], './lib/editor-plugin.js');
+assert.equal(manifest.exports?.['./plugin'], './lib/plugin.js');
 assert.equal(manifest.exports?.['./client'], './lib/edit-client.js');
 assert.equal(manifest.exports?.['./package.json'], './package.json');
 assert.equal(manifest.exports?.['./locale/*.json'], './locale/*.json');
@@ -134,6 +136,7 @@ for (const required of [
   'cordis.patch.yml',
   'lib/index.js',
   'lib/plugin.js',
+  'lib/editor-plugin.js',
   'lib/edit.js',
   'lib/edit-client.js',
   'locale/en.json',
@@ -153,6 +156,14 @@ for (const path of inventory) {
       || path.startsWith('packages/cdsh/'),
     `unexpected publication root in npm pack: ${path}`,
   );
+}
+
+for (const subpath of ['./editor-plugin', './plugin']) {
+  const target = manifest.exports?.[subpath];
+  assert.equal(typeof target, 'string', `${subpath} must be exported`);
+  assert.ok(inventorySet.has(target.replace(/^\.\//u, '')), `packed artifact is missing the ${subpath} export target`);
+  const imported = await import(`${manifest.name}/${subpath.slice(2)}`);
+  assert.equal(typeof imported.apply, 'function', `${subpath} must resolve and import through package exports`);
 }
 
 for (const path of inventory.filter(file => /\.(?:c?js|mjs|json|ya?ml|md|css|html|txt)$/iu.test(file))) {

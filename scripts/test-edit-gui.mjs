@@ -33,9 +33,9 @@ import { Session, SessionId, SessionStore } from '@deepseek-ai/dsh-session';
 
 import { EDIT_CHANNEL, EDIT_METHODS, SESSION_KEY, injectEditor, installEditGui, panelEntry } from '../lib/edit-gui.js';
 import { createPanelScript } from '../lib/edit-panel.js';
-import { blockTargets, commitUserEdit, editableIndex, editability, renderEditableList } from '../lib/edit-durable.js';
-import { createEditStore, editStatePath, planWireRewrite, signedReasoningRefusal } from '../lib/edit.js';
-import { publishEditStore, resetBridgeForTest } from '../lib/edit-bridge.js';
+import { blockTargets, commitUserEdit, editableIndex, effectiveEditableIndex, editability, renderEditableList } from '../lib/edit-durable.js';
+import { createEdit, createEditStore, editStatePath, planWireRewrite } from '../lib/edit.js';
+import { publishEditStore, publishEngine, resetBridgeForTest } from '../lib/edit-bridge.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -304,11 +304,13 @@ ok('the served request helper preserves payloads, refusals, and transport errors
   });
   for (const method of Object.values(EDIT_METHODS)) {
     const payload = { sessionId: 'session-1', seq: 8, text: 'line one\n"line two"' };
-    assert.equal(await request(method, payload), value, 'a server refusal must remain a value, not a transport error');
+    const controller = new AbortController();
+    assert.equal(await request(method, payload, controller.signal), value, 'a server refusal must remain a value, not a transport error');
     const { url, options } = sent.at(-1);
     assert.equal(url, EDIT_CHANNEL + '/' + method);
     assert.equal(options.method, 'POST');
     assert.equal(options.credentials, 'same-origin');
+    assert.equal(options.signal, controller.signal, 'the list lease signal did not reach fetch');
     assert.deepEqual(Object.entries(options.headers), [['content-type', 'application/json']]);
     const envelope = JSON.parse(options.body);
     assert.match(envelope.rpcId, /^ctxkit-[0-9]+-[0-9]+$/u);
@@ -323,6 +325,124 @@ ok('the served request helper preserves payloads, refusals, and transport errors
     response = reply;
     await assert.rejects(request(EDIT_METHODS.list, {}), { message });
   }
+});
+
+ok('a stalled list load is aborted on switch and same-generation bursts collapse', async () => {
+  const { createLoadScheduler } = panelConsts(SCRIPT, ['createLoadScheduler']);
+  let key = 'session-a:1';
+  const calls = [];
+  const load = createLoadScheduler((foreground, signal) => new Promise((resolve) => {
+    calls.push({ key, foreground, signal, resolve });
+  }), () => key, 1000);
+
+  const oldFlight = load(false);
+  const oldFollowUp = load(true);
+  await Promise.resolve();
+  assert.equal(calls.length, 1, 'same-generation bursts were not collapsed');
+  key = 'session-b:2';
+  const newFlight = load(false);
+  assert.equal(calls[0].signal.aborted, true, 'the departing session request was not aborted');
+  await Promise.resolve();
+  assert.equal(calls.length, 2, 'the new session waited behind the stalled old request');
+  assert.equal(calls[1].key, 'session-b:2');
+  assert.equal(await oldFlight, false, 'an aborted old flight reported success');
+  assert.equal(await oldFollowUp, false, 'the stale generation started a queued follow-up after the switch');
+  calls[1].resolve(true);
+  assert.equal(await newFlight, true);
+
+  calls[0].resolve(true);
+  await Promise.resolve();
+  assert.equal(calls.length, 2, 'a late old completion issued another request');
+
+  key = 'session-c:3';
+  const first = load(false);
+  const followUp = load(false);
+  const foregroundFollowUp = load(true);
+  assert.equal(followUp, foregroundFollowUp, 'one burst created more than one follow-up');
+  await Promise.resolve();
+  calls[2].resolve(true);
+  await first;
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(calls.length, 4, 'the active generation lost its collapsed follow-up');
+  assert.equal(calls[3].foreground, true, 'foreground intent was lost while the follow-up was queued');
+  calls[3].resolve(true);
+  assert.equal(await followUp, true);
+});
+
+ok('rejection and synchronous throw both release a queued foreground retry', async () => {
+  const { createLoadScheduler } = panelConsts(SCRIPT, ['createLoadScheduler']);
+  const calls = [];
+  const load = createLoadScheduler((foreground) => new Promise((resolve, reject) => {
+    calls.push({ foreground, resolve, reject });
+  }), () => 'same', 1000);
+  const rejected = load(false);
+  const queued = load(true);
+  await Promise.resolve();
+  calls[0].reject(new Error('async list failure'));
+  await assert.rejects(rejected, /async list failure/u);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(calls.length, 2, 'an asynchronous rejection left the scheduler stuck');
+  assert.equal(calls[1].foreground, true, 'foreground intent was lost after rejection');
+  calls[1].resolve(true);
+  assert.equal(await queued, true);
+
+  let attempts = 0;
+  const syncLoad = createLoadScheduler((foreground) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('synchronous list failure');
+    return foreground;
+  }, () => 'sync', 1000);
+  const syncFailure = syncLoad(false);
+  const syncQueued = syncLoad(true);
+  await assert.rejects(syncFailure, /synchronous list failure/u);
+  assert.equal(await syncQueued, true, 'a synchronous throw did not run the queued foreground retry');
+  assert.equal(attempts, 2);
+});
+
+ok('a list lease aborts a timeout and runs exactly one queued retry', async () => {
+  const { createLoadScheduler } = panelConsts(SCRIPT, ['createLoadScheduler']);
+  const calls = [];
+  let finishLate;
+  const load = createLoadScheduler((foreground, signal) => {
+    calls.push({ foreground, signal });
+    if (calls.length === 1) return new Promise((resolve) => { finishLate = resolve; });
+    return Promise.resolve('retried');
+  }, () => 'leased', 15);
+  const timedOut = load(false);
+  const queued = load(true);
+  await Promise.resolve();
+  assert.equal(await timedOut, false, 'a timed-out request did not release its flight');
+  assert.equal(calls[0].signal.aborted, true, 'the timed-out fetch signal was not aborted');
+  assert.equal(await queued, 'retried', 'the queued foreground retry did not run after timeout');
+  assert.equal(calls.length, 2, 'a retry burst produced more than one continuation');
+  assert.equal(calls[1].foreground, true);
+  finishLate(true);
+  await Promise.resolve();
+  assert.equal(calls.length, 2, 'a late timed-out completion escaped the lease');
+});
+
+ok('one foreground refresh performs one LIST surface read and no STATUS read', async () => {
+  globalThis.__ctxkitForegroundLoad = { calls: [], notices: [], state: { sessionId: 'session-1', epoch: 4, request: 0, entries: [], transcript: [], hidden: [], listed: false, draft: null, pending: null, open: false } };
+  const { performLoad } = panelConsts(SCRIPT, ['performLoad'], [
+    'const STATE = globalThis.__ctxkitForegroundLoad.state;',
+    'const syncSession = () => {}; const currentSessionId = () => STATE.sessionId;',
+    'const isCurrent = (sessionId, epoch) => STATE.sessionId === sessionId && STATE.epoch === epoch;',
+    'const say = (message, kind) => globalThis.__ctxkitForegroundLoad.notices.push([message, kind]);',
+    'const call = async (method, payload, signal) => { globalThis.__ctxkitForegroundLoad.calls.push({ method, payload, signal }); return { ok: true, sessionId: payload.sessionId, entries: [], transcript: [], hidden: [], counts: { editable: 0, total: 0 }, doctrine: [], editor: { enabled: true } }; };',
+    'const clearList = () => {}; const decorateTranscript = () => {}; const render = () => {};',
+    'const sub = { textContent: "" }; const note = { textContent: "" }; const doctrine = { replaceChildren() {}, append() {} };',
+    'const drafts = new Map(); const entryFor = () => undefined; const leaveDraft = () => true;',
+    'const focusInline = async () => false; const showPanel = () => {}; const focusRow = () => {};',
+    'const document = { createElement: () => ({ textContent: "" }) };'
+  ].join('\n'));
+  const controller = new AbortController();
+  assert.equal(await performLoad(true, controller.signal), true);
+  assert.deepEqual(globalThis.__ctxkitForegroundLoad.calls.map(({ method }) => method), ['contextKit.edit.list']);
+  assert.equal(globalThis.__ctxkitForegroundLoad.calls[0].signal, controller.signal);
+  assert.equal(globalThis.__ctxkitForegroundLoad.state.listed, true);
+  delete globalThis.__ctxkitForegroundLoad;
 });
 
 ok('the panel uses only the page-local controller bridge, never shared storage or React internals', () => {
@@ -499,18 +619,20 @@ ok('Chat CSS tokens match only the two complete module naming formats', () => {
   }
 });
 
-ok('the five methods the browser may call are the five the channel answers', () => {
+ok('the Host answers six methods while the editor surface invokes LIST instead of STATUS', () => {
   const source = readFileSync(join(ROOT, 'lib', 'edit-gui.js'), 'utf8');
+  const panel = injectEditor(PAGE);
   for (const method of Object.values(EDIT_METHODS)) {
     assert.ok(source.includes(`'${method}'`), `${method} is not named in the module`);
-    assert.ok(injectEditor(PAGE).includes(`'${method}'`), `${method} is never called by the panel`);
+    if (method !== EDIT_METHODS.status) assert.ok(panel.includes(`'${method}'`), `${method} is never called by the panel`);
   }
-  assert.deepEqual(Object.keys(EDIT_METHODS).sort(), ['commit', 'deleteMessage', 'deleteTurn', 'list', 'status']);
+  assert.ok(!panel.includes(`call('${EDIT_METHODS.status}'`), 'the editor surface still issues a duplicate STATUS read');
+  assert.deepEqual(Object.keys(EDIT_METHODS).sort(), ['commit', 'deleteMessage', 'deleteTurn', 'list', 'status', 'truncateAfter']);
 });
 
 ok('the panel refuses nothing silently: refusals are shown as text', () => {
   const out = injectEditor(PAGE);
-  assert.ok(out.includes('cannot be edited here'), 'a refused message would render without an explanation');
+  assert.ok(out.includes('Unavailable: '), 'a refused message would render without an explanation');
   assert.ok(out.includes('Not saved.'), 'a refused save would render without feedback');
 });
 
@@ -584,6 +706,35 @@ ok('a Web surface registers exactly one channel and one tap, and releases both',
 
   dispose();
   assert.deepEqual([...released].sort(), ['effect', 'route', 'tap'], 'the channel route and the tap must both be released');
+});
+
+ok('an explicit route session never falls back to the newest bridged engine', async () => {
+  const routes = [];
+  const releaseEngine = publishEngine('edit-gui-route-exact', {
+    dcpConfig: { editor: { enabled: true } }
+  });
+  const ctx = {
+    get: (key) => key === 'connection'
+      ? { rpc: { handle() {} } }
+      : key === 'webServer'
+        ? { register: (route) => { routes.push(route); return () => {}; }, tapIndex: () => () => {} }
+        : undefined,
+    effect: (body) => body()
+  };
+  const dispose = installEditGui(ctx);
+  try {
+    const answer = routeAnswer(routes[0]);
+    const exact = await answer(EDIT_METHODS.status, { sessionId: 'edit-gui-route-exact' });
+    assert.equal(exact.body.result.value.enabled, true, 'the exact bridged engine was not selected');
+
+    const missing = await answer(EDIT_METHODS.list, { sessionId: 'edit-gui-route-missing' });
+    assert.equal(missing.status, 200, 'an exact-session refusal must remain displayable content');
+    assert.equal(missing.body.result.ok, false, 'an unknown explicit session fell back to another engine');
+    assert.match(missing.body.result.error.message, /not mounted for session "edit-gui-route-missing"/u);
+  } finally {
+    dispose();
+    releaseEngine();
+  }
 });
 
 ok('a Web surface that comes up LATER is still mounted (the load-order bug)', () => {
@@ -967,7 +1118,7 @@ ok('the decorator hides only the exact assistant row for a delete-message tombst
     'const document = globalThis.__ctxkitHiddenDocument;',
     'const flowRows = () => [...document.querySelectorAll(FLOW_SELECTOR)];',
     'const running = () => false; const installAffordance = () => {};',
-    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const PENCIL_ATTR = "data-ctxkit-pencil";',
+    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const DELETE_STRIP_ATTR = "data-ctxkit-delete-strip"; const PENCIL_ATTR = "data-ctxkit-pencil";',
     'const projectRow = () => {}; const placeDeleteAction = () => {};'
   ].join('\n'));
   STATE.sessionId = 'test-session';
@@ -1018,8 +1169,8 @@ ok('nested editable regions paint one deepest hover outline and share their mark
   head.querySelector = (selector) => head.children.find((child) => child.tagName === 'STYLE'
     && selector === 'style[data-ctxkit-affordance]' && child.hasAttribute('data-ctxkit-affordance')) || null;
   globalThis.__ctxkitAffordanceDocument = { head, createElement: (tag) => fakeElement(tag) };
-  const { EDIT_ATTR, AFFORDANCE_ATTR, installAffordance, markRegion, unmarkRegion, pinAt } = panelConsts(injectEditor(PAGE), [
-    'PENCIL_ATTR', 'HIDDEN_TURN_ATTR', 'EDIT_ATTR', 'AFFORDANCE_ATTR', 'installAffordance',
+  const { EDIT_ATTR, AFFORDANCE_ATTR, DELETE_STRIP_ATTR, installAffordance, markRegion, unmarkRegion, pinAt } = panelConsts(injectEditor(PAGE), [
+    'PENCIL_ATTR', 'DELETE_STRIP_ATTR', 'HIDDEN_TURN_ATTR', 'EDIT_ATTR', 'AFFORDANCE_ATTR', 'installAffordance',
     'regionOwners', 'markRegion', 'unmarkRegion', 'pinAt'
   ], 'const document = globalThis.__ctxkitAffordanceDocument;');
   installAffordance();
@@ -1039,6 +1190,11 @@ ok('nested editable regions paint one deepest hover outline and share their mark
     'the hover outline still uses a bright accent');
   assert.doesNotMatch(styles[0].textContent, /\[data-ctxkit-edit\]:hover\s*\{/u,
     'a generic parent hover painter bypasses the deepest-only rule');
+  assert.match(
+    styles[0].textContent,
+    new RegExp('\\[' + DELETE_STRIP_ATTR + '\\]\\s*\\{[^}]*opacity:\\s*1\\s*!important', 'u'),
+    'delete controls inside the native action strip can still be hidden outside hover'
+  );
 
   const shared = fakeElement('div');
   markRegion(shared);
@@ -1061,7 +1217,8 @@ ok('nested editable regions paint one deepest hover outline and share their mark
   delete globalThis.__ctxkitAffordanceDocument;
 });
 
-ok('re-decoration keeps exactly one delete action on a direct human row', () => {
+ok('a direct human row keeps distinct delete-turn and truncate-after actions without duplicates', () => {
+  globalThis.__ctxkitDeleteAction = { calls: [] };
   globalThis.__ctxkitDeleteDocument = {
     createElement: (tag) => fakeElement(tag),
     createElementNS: (_namespace, tag) => fakeElement(tag)
@@ -1072,7 +1229,10 @@ ok('re-decoration keeps exactly one delete action on a direct human row', () => 
     'const document = globalThis.__ctxkitDeleteDocument;',
     'const DELETE_ACTION_ATTR = "data-ctxkit-delete";',
     'const DELETE_REGION_ATTR = "data-ctxkit-delete-region";',
-    'const requestTurnDeletion = () => {};',
+    'const DELETE_STRIP_ATTR = "data-ctxkit-delete-strip";',
+    'const installAffordance = () => {};',
+    'const requestTurnDeletion = (entry, control) => globalThis.__ctxkitDeleteAction.calls.push(["turn", entry, control]);',
+    'const requestTruncateAfter = (entry, control) => globalThis.__ctxkitDeleteAction.calls.push(["after", entry, control]);',
     'const requestMessageDeletion = () => {};',
     'const userActionStrip = (node) => node;',
     'const textLayout = () => ({ containers: [], thinks: [] });'
@@ -1080,11 +1240,64 @@ ok('re-decoration keeps exactly one delete action on a direct human row', () => 
   const row = fakeElement('article');
   const entry = { type: 'user/message', directUser: true, seq: 17 };
   placeDeleteAction(row, entry);
-  const first = row.querySelector('[data-ctxkit-delete]');
+  const first = row.querySelectorAll('[data-ctxkit-delete]');
   placeDeleteAction(row, entry);
-  assert.equal(row.querySelectorAll('[data-ctxkit-delete]').length, 1, 'a second decoration duplicated Delete turn');
-  assert.equal(row.querySelector('[data-ctxkit-delete]'), first, 'a stable delete action was unnecessarily replaced');
+  const actions = row.querySelectorAll('[data-ctxkit-delete]');
+  assert.equal(actions.length, 2, 'a direct user row must expose both destructive choices exactly once');
+  assert.equal(row.hasAttribute('data-ctxkit-delete-strip'), true,
+    'the native action strip was not marked for permanent visibility');
+  assert.deepEqual(actions.map((action) => action.getAttribute('data-ctxkit-delete')).sort(), ['after:17', 'turn:17']);
+  assert.deepEqual(actions, first, 'stable direct-user actions were unnecessarily replaced');
+  const buttons = actions.map((action) => action.shadowRoot.children.find((child) => child.tagName === 'BUTTON'));
+  assert.deepEqual(buttons.map((button) => button.children.find((child) => child.tagName === 'SPAN')?.textContent).sort(),
+    ['Delete turn', 'Hide all history after this message'], 'the two destructive choices are not visibly named');
+  assert.equal(new Set(buttons.map((button) => button.children.find((child) => child.tagName === 'SVG')
+    ?.children[0]?.getAttribute('d'))).size, 2, 'delete-turn and truncate-after still use the same glyph');
+  for (const button of buttons) button.dispatch('click');
+  assert.deepEqual(globalThis.__ctxkitDeleteAction.calls.map((call) => call[0]).sort(), ['after', 'turn']);
+  assert.ok(globalThis.__ctxkitDeleteAction.calls.every((call) => call[1] === entry));
+  delete globalThis.__ctxkitDeleteAction;
   delete globalThis.__ctxkitDeleteDocument;
+});
+
+ok('an unmatched visible user row keeps disabled destructive controls and clears stale strip state', () => {
+  globalThis.__ctxkitUnavailableActionDocument = {
+    createElement: (tag) => fakeElement(tag),
+    createElementNS: (_namespace, tag) => fakeElement(tag)
+  };
+  const { STATE, placeDeleteAction } = panelConsts(injectEditor(PAGE), [
+    'STATE', 'canDeleteTurn', 'canDeleteMessage', 'placeDeleteAction'
+  ], [
+    'const document = globalThis.__ctxkitUnavailableActionDocument;',
+    'const DELETE_ACTION_ATTR = "data-ctxkit-delete";',
+    'const DELETE_REGION_ATTR = "data-ctxkit-delete-region";',
+    'const DELETE_STRIP_ATTR = "data-ctxkit-delete-strip";',
+    'const installAffordance = () => {};',
+    'const requestTurnDeletion = () => { throw Error("disabled action ran"); };',
+    'const requestTruncateAfter = () => { throw Error("disabled action ran"); };',
+    'const requestMessageDeletion = () => { throw Error("disabled action ran"); };',
+    'const userActionStrip = (node) => node;',
+    'const textLayout = () => ({ containers: [], thinks: [] });'
+  ].join('\n'));
+  const row = fakeElement('article');
+  row.setAttribute('data-chat-flow-kind', 'user');
+  STATE.listed = true;
+  placeDeleteAction(row, undefined);
+  const actions = row.querySelectorAll('[data-ctxkit-delete]');
+  assert.equal(actions.length, 2, 'the unmatched direct-user row lost its two destructive controls');
+  const buttons = actions.map((action) => action.shadowRoot.children.find((child) => child.tagName === 'BUTTON'));
+  assert.ok(buttons.every((button) => button.disabled === true), 'an unmatched-row destructive action stayed enabled');
+  assert.deepEqual(buttons.map((button) => button.children[1].textContent).sort(),
+    ['Delete turn', 'Hide all history after this message']);
+  assert.ok(buttons.every((button) => /^Unavailable: This row is not among/u.test(button.title)),
+    'the disabled controls do not explain why they are unavailable');
+  assert.equal(row.hasAttribute('data-ctxkit-delete-strip'), true);
+
+  STATE.listed = false;
+  placeDeleteAction(row, undefined);
+  assert.equal(row.querySelectorAll('[data-ctxkit-delete]').length, 0, 'ineligible controls were not removed');
+  assert.equal(row.hasAttribute('data-ctxkit-delete-strip'), false, 'stale delete-strip eligibility survived');
+  delete globalThis.__ctxkitUnavailableActionDocument;
 });
 
 ok('an assistant row keeps one exact delete-message action and wires its callback', () => {
@@ -1099,6 +1312,8 @@ ok('an assistant row keeps one exact delete-message action and wires its callbac
     'const document = globalThis.__ctxkitDeleteDocument;',
     'const DELETE_ACTION_ATTR = "data-ctxkit-delete";',
     'const DELETE_REGION_ATTR = "data-ctxkit-delete-region";',
+    'const DELETE_STRIP_ATTR = "data-ctxkit-delete-strip";',
+    'const installAffordance = () => {};',
     'const requestTurnDeletion = () => { throw Error("assistant action called deleteTurn"); };',
     'const requestMessageDeletion = (entry, control) => globalThis.__ctxkitDeleteAction.calls.push([entry, control]);',
     'const userActionStrip = () => null;',
@@ -1114,25 +1329,25 @@ ok('an assistant row keeps one exact delete-message action and wires its callbac
   assert.equal(first.getAttribute('data-ctxkit-delete'), 'message:18');
   assert.ok(row.hasAttribute('data-ctxkit-delete-region'), 'the deletable row is not marked as the hover region');
   const style = first.shadowRoot.children.find((child) => child.tagName === 'STYLE');
-  assert.match(style.textContent, /:host\{display:inline-flex;[^}]*width:0;height:0;opacity:0;pointer-events:none/u,
-    'the delete action occupies space or is visible before row hover');
+  assert.match(style.textContent, /:host\{display:inline-flex;[^}]*opacity:1;pointer-events:auto/u,
+    'the delete action is not permanently visible and clickable');
+  assert.doesNotMatch(style.textContent, /width:0|height:0|opacity:0|pointer-events:none/u,
+    'the delete action still collapses or hides at rest');
   assert.match(style.textContent,
-    /:host-context\(\[data-ctxkit-delete-region\]:hover\)\{width:auto;height:auto;opacity:1;pointer-events:auto/u,
-    'hovering the message row does not reveal the delete action');
-  assert.match(style.textContent, /:host\(:focus-within\)\{width:auto;height:auto;opacity:1;pointer-events:auto/u,
-    'keyboard focus cannot reveal the delete action');
-  assert.match(style.textContent, /@media\(hover:none\)\{:host\{width:auto;height:auto;opacity:1;pointer-events:auto/u,
-    'touch input has no reachable delete action');
-  assert.match(style.textContent,
-    /button\{[^}]*width:32px;height:32px;[^}]*border:1px solid color-mix\(in srgb,var\(--dsw-alias-state-error-primary\) 38%,transparent\);[^}]*background:color-mix\(in srgb,var\(--dsw-alias-state-error-primary\) 12%,transparent\)/u,
-    'the revealed delete button is still too easy to miss');
-  assert.match(style.textContent, /svg\{[^}]*width:18px;height:18px;[^}]*stroke-width:2\.1/u,
+    /button\{[^}]*min-width:36px;height:36px;[^}]*border:1px solid color-mix\(in srgb,var\(--dsw-alias-state-error-primary\) 55%,transparent\);[^}]*background:color-mix\(in srgb,var\(--dsw-alias-state-error-primary\) 16%,transparent\)/u,
+    'the permanent delete button is still too easy to miss');
+  assert.match(style.textContent, /svg\{[^}]*width:17px;height:17px;[^}]*stroke-width:2/u,
     'the trash glyph is still too small or faint');
+  assert.match(style.textContent, /@media\(pointer:coarse\)\{button\{min-height:44px/u,
+    'touch input has no 44px delete target');
   const button = first.shadowRoot.children.find((child) => child.tagName === 'BUTTON');
-  assert.equal(button.textContent, '', 'the destructive action still renders a text label');
-  assert.equal(button.children.length, 1, 'the destructive action has more than one visible mark');
+  assert.equal(button.children.length, 2, 'the destructive action must render an icon and readable label');
   assert.equal(button.children[0].tagName, 'SVG', 'the destructive action does not render an icon');
   assert.equal(button.children[0].children[0]?.tagName, 'PATH', 'the trash icon has no path');
+  assert.equal(button.children[0].children[0]?.getAttribute('d'), 'M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5m4-5v5',
+    'the assistant action is not visibly distinguished as deletion');
+  assert.equal(button.children[1].tagName, 'SPAN');
+  assert.equal(button.children[1].textContent, 'Delete reply', 'the assistant action has no readable label');
   assert.equal(button.getAttribute('aria-label'), 'Delete this assistant message');
   button.dispatch('click');
   assert.equal(globalThis.__ctxkitDeleteAction.calls.length, 1, 'the assistant action did not request message deletion');
@@ -1143,7 +1358,7 @@ ok('an assistant row keeps one exact delete-message action and wires its callbac
 });
 
 ok('turn deletion waits for confirmation, sends the exact payload, and refreshes only after Host success', async () => {
-  globalThis.__ctxkitDelete = { running: false, confirmation: null, calls: [], loads: 0, notices: [], answer: { ok: true } };
+  globalThis.__ctxkitDelete = { running: false, confirmation: null, calls: [], loads: 0, focuses: 0, notices: [], answer: { ok: true } };
   const { STATE, requestTurnDeletion } = panelConsts(injectEditor(PAGE), [
     'STATE', 'entryFor', 'canDeleteTurn', 'requestTurnDeletion'
   ], [
@@ -1154,6 +1369,7 @@ ok('turn deletion waits for confirmation, sends the exact payload, and refreshes
     'const askConfirmation = (title, message, action, accept, cancel) => { globalThis.__ctxkitDelete.confirmation = { title, message, action, accept, cancel }; };',
     'const call = async (method, payload) => { globalThis.__ctxkitDelete.calls.push([method, payload]); return globalThis.__ctxkitDelete.answer; };',
     'const isCurrent = () => true;',
+    'const moveFocusBeforeHiding = () => { globalThis.__ctxkitDelete.focuses += 1; };',
     'const load = async () => { globalThis.__ctxkitDelete.loads += 1; return true; };',
     'const STOP_GENERATION = "Generation is running. Stop generation before editing or deleting history.";'
   ].join('\n'));
@@ -1171,6 +1387,7 @@ ok('turn deletion waits for confirmation, sends the exact payload, and refreshes
     sessionId: 'session-a', seq: 17, id: 'wire-u', expected: 'question'
   }]]);
   assert.equal(globalThis.__ctxkitDelete.loads, 1, 'Host success must refresh exactly once');
+  assert.equal(globalThis.__ctxkitDelete.focuses, 1, 'focus stayed inside the turn that was hidden');
 
   globalThis.__ctxkitDelete.confirmation = null;
   globalThis.__ctxkitDelete.running = true;
@@ -1184,13 +1401,55 @@ ok('turn deletion waits for confirmation, sends the exact payload, and refreshes
   const before = STATE.transcript;
   await globalThis.__ctxkitDelete.confirmation.accept();
   assert.equal(globalThis.__ctxkitDelete.loads, 1, 'Host refusal must not refresh or hide anything');
+  assert.equal(globalThis.__ctxkitDelete.focuses, 1, 'Host refusal moved focus away from a row that stayed visible');
   assert.equal(STATE.transcript, before, 'Host refusal optimistically replaced the transcript');
   assert.match(globalThis.__ctxkitDelete.notices.at(-1)[0], /generation won the race/u);
   delete globalThis.__ctxkitDelete;
 });
 
+ok('truncate-after requires confirmation and sends the retained user boundary exactly', async () => {
+  globalThis.__ctxkitTruncate = { confirmation: null, calls: [], loads: 0, focuses: 0, notices: [], answer: { ok: true } };
+  const { STATE, requestTruncateAfter } = panelConsts(injectEditor(PAGE), [
+    'STATE', 'entryFor', 'canDeleteTurn', 'requestTruncateAfter'
+  ], [
+    'const syncSession = () => {};',
+    'const generationRunning = () => false;',
+    'const say = (message, kind) => globalThis.__ctxkitTruncate.notices.push([message, kind]);',
+    'const leaveDraft = () => true;',
+    'const askConfirmation = (title, message, action, accept, cancel) => { globalThis.__ctxkitTruncate.confirmation = { title, message, action, accept, cancel }; };',
+    'const call = async (method, payload) => { globalThis.__ctxkitTruncate.calls.push([method, payload]); return globalThis.__ctxkitTruncate.answer; };',
+    'const isCurrent = () => true;',
+    'const moveFocusBeforeHiding = () => { globalThis.__ctxkitTruncate.focuses += 1; };',
+    'const load = async () => { globalThis.__ctxkitTruncate.loads += 1; return true; };',
+    'const STOP_GENERATION = "Generation is running. Stop generation before editing or deleting history.";'
+  ].join('\n'));
+  const entry = { type: 'user/message', directUser: true, id: 'wire-u', seq: 17, text: 'question' };
+  STATE.sessionId = 'session-a';
+  STATE.epoch = 4;
+  STATE.transcript = [entry];
+
+  requestTruncateAfter(entry, { isConnected: true, disabled: false });
+  assert.equal(globalThis.__ctxkitTruncate.confirmation.action, 'Hide all history after this message');
+  assert.match(globalThis.__ctxkitTruncate.confirmation.message, /Keep this message/u);
+  assert.deepEqual(globalThis.__ctxkitTruncate.calls, [], 'truncate-after ran before confirmation');
+  await globalThis.__ctxkitTruncate.confirmation.accept();
+  assert.deepEqual(globalThis.__ctxkitTruncate.calls, [[EDIT_METHODS.truncateAfter, {
+    sessionId: 'session-a', seq: 17, id: 'wire-u', expected: 'question'
+  }]]);
+  assert.equal(globalThis.__ctxkitTruncate.loads, 1);
+  assert.equal(globalThis.__ctxkitTruncate.focuses, 1, 'focus stayed inside history that was hidden');
+
+  globalThis.__ctxkitTruncate.answer = { ok: false, reason: 'stale retained boundary' };
+  requestTruncateAfter(entry);
+  await globalThis.__ctxkitTruncate.confirmation.accept();
+  assert.equal(globalThis.__ctxkitTruncate.loads, 1, 'a stale boundary must not refresh or hide rows');
+  assert.equal(globalThis.__ctxkitTruncate.focuses, 1, 'a stale boundary moved focus from visible history');
+  assert.match(globalThis.__ctxkitTruncate.notices.at(-1)[0], /stale retained boundary/u);
+  delete globalThis.__ctxkitTruncate;
+});
+
 ok('assistant deletion waits for confirmation and sends the exact message payload', async () => {
-  globalThis.__ctxkitDeleteMessage = { running: false, confirmation: null, calls: [], loads: 0, notices: [], answer: { ok: true } };
+  globalThis.__ctxkitDeleteMessage = { running: false, confirmation: null, calls: [], loads: 0, focuses: 0, notices: [], answer: { ok: true } };
   const { STATE, requestMessageDeletion } = panelConsts(injectEditor(PAGE), [
     'STATE', 'entryFor', 'canDeleteMessage', 'requestMessageDeletion'
   ], [
@@ -1201,6 +1460,7 @@ ok('assistant deletion waits for confirmation and sends the exact message payloa
     'const askConfirmation = (title, message, action, accept, cancel) => { globalThis.__ctxkitDeleteMessage.confirmation = { title, message, action, accept, cancel }; };',
     'const call = async (method, payload) => { globalThis.__ctxkitDeleteMessage.calls.push([method, payload]); return globalThis.__ctxkitDeleteMessage.answer; };',
     'const isCurrent = () => true;',
+    'const moveFocusBeforeHiding = () => { globalThis.__ctxkitDeleteMessage.focuses += 1; };',
     'const load = async () => { globalThis.__ctxkitDeleteMessage.loads += 1; return true; };',
     'const STOP_GENERATION = "Generation is running. Stop generation before editing or deleting history.";'
   ].join('\n'));
@@ -1217,11 +1477,13 @@ ok('assistant deletion waits for confirmation and sends the exact message payloa
     sessionId: 'session-a', seq: 18, id: 'wire-a', expected: 'answer'
   }]]);
   assert.equal(globalThis.__ctxkitDeleteMessage.loads, 1, 'Host success must refresh exactly once');
+  assert.equal(globalThis.__ctxkitDeleteMessage.focuses, 1, 'focus stayed inside the assistant row that was hidden');
 
   globalThis.__ctxkitDeleteMessage.answer = { ok: false, reason: 'stale assistant' };
   requestMessageDeletion(entry);
   await globalThis.__ctxkitDeleteMessage.confirmation.accept();
   assert.equal(globalThis.__ctxkitDeleteMessage.loads, 1, 'Host refusal must not refresh or hide anything');
+  assert.equal(globalThis.__ctxkitDeleteMessage.focuses, 1, 'Host refusal moved focus from the visible assistant row');
   assert.match(globalThis.__ctxkitDeleteMessage.notices.at(-1)[0], /stale assistant/u);
   delete globalThis.__ctxkitDeleteMessage;
 });
@@ -1518,8 +1780,8 @@ function pinButton(pin) {
  * (`dcp.js`), so `commitValue` finds the store it writes to.
  *
  * @param replyBlocks - the content of the assistant reply.
- * @param options - `id` for the session and `source` for the reply message.
- * @returns the session id, the reply entry, the wire store and the route driver.
+ * @param options - `id`/`source` for the reply and optional `toolResult` event data.
+ * @returns the session id, editable entries, wire store and route driver.
  */
 async function mountedPanel(replyBlocks, options = {}) {
   const context = new Context();
@@ -1543,12 +1805,25 @@ async function mountedPanel(replyBlocks, options = {}) {
       source: options.source ?? { kind: 'model', provider: 'stub', model: 'stub' }
     })
   }, { surfaceOp: 'append' });
+  if (options.toolResult !== undefined) {
+    const { callId, content, isError = false, messageExtras = {}, dataExtras = {} } = options.toolResult;
+    session.append('tool/result', {
+      turn: 1,
+      step: 1,
+      ...dataExtras,
+      message: {
+        ...llm.createToolResultMessage({ callId: llm.ToolCallId(callId), content, isError }),
+        ...messageExtras
+      }
+    }, { surfaceOp: 'append' });
+  }
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   const routes = [];
+  const sessionForHost = () => typeof options.sessionView === 'function' ? options.sessionView(session) : session;
   const ctx = {
     get: (key) => (key === 'sessions'
-      ? { get: (id) => (String(id) === String(session.id) ? session : undefined) }
+      ? { get: (id) => (String(id) === String(session.id) ? sessionForHost() : undefined) }
       : key === 'agents'
         ? options.hostAgent === undefined
           ? undefined
@@ -1567,14 +1842,166 @@ async function mountedPanel(replyBlocks, options = {}) {
   installEditGui(ctx, engine);
   assert.equal(routes.length, 1, 'the commit path needs the panel route to be mounted');
   const wire = createEditStore({ restore: false });
+  let anchorRebaseCalls = 0;
+  const prepareTruncateAnchorRebase = wire.prepareTruncateAnchorRebase;
+  wire.prepareTruncateAnchorRebase = (...args) => {
+    anchorRebaseCalls += 1;
+    return prepareTruncateAnchorRebase(...args);
+  };
   publishEditStore(String(session.id), wire);
-  const reply = editableIndex(session).find((entry) => entry.type === 'assistant/message');
-  const user = editableIndex(session).find((entry) => entry.type === 'user/message');
+  const index = editableIndex(session);
+  const reply = index.find((entry) => entry.type === 'assistant/message');
+  const user = index.find((entry) => entry.type === 'user/message');
+  const tool = index.find((entry) => entry.type === 'tool/result');
   return {
-    sessionId: String(session.id), get session() { return session; }, reply, user, wire, engine, answer: routeAnswer(routes[0]),
+    sessionId: String(session.id), get session() { return session; }, reply, user, tool, wire, engine,
+    get anchorRebaseCalls() { return anchorRebaseCalls; }, answer: routeAnswer(routes[0]),
     reload() { session = Session.create(session.id, session.snapshotEvents()); }
   };
 }
+
+ok('effective projection reuses a prebuilt raw index instead of walking the surface twice', async () => {
+  const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], { id: 'edit-gui-single-index-pass' });
+  const raw = editableIndex(panel.session);
+  const noSecondWalk = {
+    get surface() { throw new Error('effective projection walked surface.nodes twice'); },
+    get log() { return panel.session.log; },
+    eventAt: (seq) => panel.session.eventAt(seq)
+  };
+  assert.deepEqual(effectiveEditableIndex(noSecondWalk, [], raw).map((entry) => entry.text), ['QUESTION', 'ANSWER']);
+});
+
+ok('the real list route walks the session surface once with a non-empty edit set', async () => {
+  let surfaceReads = 0;
+  const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], {
+    id: 'edit-gui-list-single-index-pass',
+    sessionView: (session) => new Proxy(session, {
+      get(target, property) {
+        if (property === 'surface') surfaceReads += 1;
+        return Reflect.get(target, property, target);
+      }
+    })
+  });
+  const recorded = panel.wire.record(panel.sessionId, panel.reply.message, 'ANSWER, EDITED', {
+    messageIndex: panel.reply.index, expected: 'ANSWER'
+  });
+  assert.equal(recorded.ok, true, String(recorded.reason));
+  const value = (await panel.answer(EDIT_METHODS.list, { sessionId: panel.sessionId })).body.result.value;
+  assert.equal(value.ok, true, String(value.reason));
+  assert.equal(value.transcript.at(-1).text, 'ANSWER, EDITED');
+  assert.equal(surfaceReads, 1, 'the real list route walked surface.nodes more than once');
+});
+
+ok('the GUI durably edits and restores host tool results without an anchor transaction', async () => {
+  const callId = 'edit-gui-host-call';
+  const image = { type: 'image', source: { type: 'url', url: 'https://example.invalid/gui-result.png' } };
+  const panel = await mountedPanel([
+    { type: 'tool-call', id: llm.ToolCallId(callId), name: 'read', arguments: '{"filePath":"a.js"}' }
+  ], {
+    id: 'edit-gui-host-tool-result',
+    toolResult: {
+      callId,
+      content: [{ type: 'text', text: 'HOST BODY', annotations: { keep: 'text metadata' } }, image],
+      isError: true,
+      messageExtras: { metadata: { keep: 'message metadata' } },
+      dataExtras: { error: { code: 'E_GUI', reason: 'keep raw error' }, meta: { keep: true } }
+    }
+  });
+  const originalEvent = panel.session.eventAt(panel.tool.seq);
+  const originalLogLength = panel.session.snapshotEvents().length;
+  const outsideContent = (event) => ({
+    ...event.data,
+    message: { ...event.data.message, content: null }
+  });
+
+  let listed = (await panel.answer(EDIT_METHODS.list, { sessionId: panel.sessionId })).body.result.value;
+  let shown = listed.entries.find((entry) => entry.type === 'tool/result');
+  assert.equal(shown.targets[0].label, 'Tool result');
+  assert.equal(shown.targets[0].text, 'HOST BODY');
+  assert.equal(shown.branch, 'durable');
+
+  const edited = (await panel.answer(EDIT_METHODS.commit, {
+    sessionId: panel.sessionId,
+    seq: shown.seq,
+    id: shown.id,
+    block: shown.targets[0].at,
+    expected: 'HOST BODY',
+    text: 'HOST BODY EDITED'
+  })).body.result.value;
+  assert.equal(edited.ok, true, String(edited.reason));
+  assert.equal(edited.report.branch, 'durable');
+  assert.equal(edited.report.before, 'HOST BODY');
+  assert.equal(edited.report.after, 'HOST BODY EDITED');
+  assert.equal(panel.anchorRebaseCalls, 0, 'a tool result entered the user-anchor transaction');
+  assert.equal(panel.wire.editsFor(panel.sessionId).length, 0, 'a durable result leaked into the wire store');
+
+  listed = (await panel.answer(EDIT_METHODS.list, { sessionId: panel.sessionId })).body.result.value;
+  shown = listed.entries.find((entry) => entry.type === 'tool/result');
+  const editedEvent = panel.session.eventAt(shown.seq);
+  assert.equal(shown.targets[0].text, 'HOST BODY EDITED');
+  assert.equal(shown.targets[0].originalText, 'HOST BODY');
+  assert.equal(shown.edited, true);
+  assert.equal(shown.changed, true);
+  assert.deepEqual(outsideContent(editedEvent), outsideContent(originalEvent), 'the GUI changed data outside message.content');
+  assert.deepEqual(editedEvent.sourceEventSeqs, [panel.tool.seq]);
+  assert.deepEqual(editedEvent.data.message.content[1], image, 'a non-text result block was lost');
+
+  const restored = (await panel.answer(EDIT_METHODS.commit, {
+    sessionId: panel.sessionId,
+    seq: shown.seq,
+    id: shown.id,
+    block: shown.targets[0].at,
+    expected: 'HOST BODY EDITED',
+    restore: true
+  })).body.result.value;
+  assert.equal(restored.ok, true, String(restored.reason));
+  assert.equal(restored.report.after, 'HOST BODY');
+  assert.equal(panel.anchorRebaseCalls, 0, 'restore entered the user-anchor transaction');
+  assert.equal(panel.session.snapshotEvents().length, originalLogLength + 2, 'edit/restore did not append exactly two replacements');
+
+  listed = (await panel.answer(EDIT_METHODS.list, { sessionId: panel.sessionId })).body.result.value;
+  shown = listed.entries.find((entry) => entry.type === 'tool/result');
+  const restoredEvent = panel.session.eventAt(shown.seq);
+  assert.equal(shown.targets[0].text, 'HOST BODY');
+  assert.equal(shown.targets[0].originalText, 'HOST BODY');
+  assert.equal(shown.edited, true);
+  assert.equal(shown.changed, false);
+  assert.deepEqual(outsideContent(restoredEvent), outsideContent(originalEvent));
+  assert.deepEqual(restoredEvent.data.message.content[1], image);
+});
+
+ok('effective history indexing stays linear in a large non-empty edit set', () => {
+  const count = 200;
+  const messages = Array.from({ length: count }, (_, index) => ({
+    id: 'message-' + index,
+    role: 'assistant',
+    content: [{ type: 'text', text: 'before-' + index }],
+    source: { kind: 'model' }
+  }));
+  const raw = messages.map((message, index) => ({
+    seq: index, type: 'assistant/message', role: 'assistant', id: message.id,
+    index, text: message.content[0].text, blocks: 1, message
+  }));
+  let propertyReads = 0;
+  const edits = messages.map((message, index) => {
+    const made = createEdit({
+      sessionId: 'linear-history', index, message, newText: 'after-' + index,
+      expected: 'before-' + index, at: index
+    });
+    assert.equal(made.ok, true, String(made.reason));
+    return new Proxy(made.edit, {
+      get(target, property, receiver) {
+        propertyReads += 1;
+        return Reflect.get(target, property, receiver);
+      }
+    });
+  });
+  const projected = effectiveEditableIndex({ eventAt: () => undefined, log: [] }, edits, raw);
+  assert.equal(projected.length, count);
+  assert.equal(projected.at(-1).text, 'after-' + (count - 1));
+  assert.ok(propertyReads < count * 80,
+    `edit metadata was read ${propertyReads} times for ${count} edits; history indexing is no longer linear`);
+});
 
 ok('the list identifies only direct human messages as turn-deletion anchors', async () => {
   const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], { id: 'edit-gui-direct-user' });
@@ -1645,6 +2072,73 @@ ok('the delete-message route tombstones exactly one assistant envelope without m
   assert.equal(listed.hidden[0].deletedTurn, false, 'a partial assistant deletion was classified as a whole turn');
 });
 
+ok('truncate-after keeps the selected direct user message and hides the complete later history', async () => {
+  const panel = await mountedPanel([{ type: 'text', text: 'ANSWER 1' }], { id: 'edit-gui-truncate-after' });
+  panel.session.append('turn/end', { turn: 1 });
+  panel.session.append('turn/start', { turn: 2 });
+  panel.session.append('user/message', llm.createUserMessage({
+    content: [{ type: 'text', text: 'QUESTION 2' }], source: { kind: 'user' }
+  }), { surfaceOp: 'append' });
+  panel.session.append('assistant/message', {
+    turn: 2,
+    step: 1,
+    stream: [],
+    message: llm.createAssistantMessage({
+      content: [{ type: 'text', text: 'ANSWER 2' }],
+      source: { kind: 'model', provider: 'stub', model: 'stub' }
+    })
+  }, { surfaceOp: 'append' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const before = panel.session.snapshotEvents();
+  const removed = await panel.answer(EDIT_METHODS.truncateAfter, {
+    sessionId: panel.sessionId, seq: panel.user.seq, id: panel.user.id, expected: 'QUESTION'
+  });
+  assert.equal(removed.body.result.value.ok, true, String(removed.body.result.value.reason));
+  assert.deepEqual(panel.session.snapshotEvents(), before, 'truncate-after must not mutate the source session log');
+  const tombstone = panel.wire.editsFor(panel.sessionId).at(-1);
+  assert.equal(tombstone?.kind, 'truncate-after');
+  assert.equal(tombstone?.members.length, 3, 'the suffix snapshot omitted a later message');
+  const listed = (await panel.answer(EDIT_METHODS.list, { sessionId: panel.sessionId })).body.result.value;
+  assert.deepEqual(listed.transcript.map((entry) => entry.text), ['QUESTION'], 'the retained anchor was removed or a suffix row survived');
+  assert.deepEqual(listed.hidden.map((entry) => entry.text), ['ANSWER 1', 'QUESTION 2', 'ANSWER 2']);
+  assert.ok(listed.hidden.every((entry) => entry.truncated === true), 'the client cannot distinguish a hidden suffix');
+
+  const editedAnchor = await panel.answer(EDIT_METHODS.commit, {
+    sessionId: panel.sessionId, seq: panel.user.seq, id: panel.user.id,
+    expected: 'QUESTION', text: 'QUESTION, CORRECTED'
+  });
+  assert.equal(editedAnchor.body.result.value.ok, true, String(editedAnchor.body.result.value.reason));
+  const afterAnchorEdit = (await panel.answer(EDIT_METHODS.list, { sessionId: panel.sessionId })).body.result.value;
+  assert.deepEqual(afterAnchorEdit.transcript.map((entry) => entry.text), ['QUESTION, CORRECTED'],
+    'editing the retained anchor resurrected the truncated suffix');
+  assert.deepEqual(afterAnchorEdit.hidden.map((entry) => entry.text), ['ANSWER 1', 'QUESTION 2', 'ANSWER 2'],
+    'editing the retained anchor changed which snapshotted messages are hidden');
+  const rebased = panel.wire.editsFor(panel.sessionId).find((edit) => edit.kind === 'truncate-after');
+  assert.equal(rebased?.before, 'QUESTION, CORRECTED', 'the truncate anchor was not rebased to the durable replacement');
+  assert.equal(rebased?.messageId, editedAnchor.body.result.value.report.replacementId,
+    'the truncate anchor did not follow the replacement id');
+
+  const reloaded = createEditStore().editsFor(panel.sessionId);
+  assert.equal(reloaded.at(-1)?.kind, 'truncate-after', 'truncate-after did not survive store reload');
+  assert.equal(reloaded.at(-1)?.before, 'QUESTION, CORRECTED', 'the rebased truncate anchor did not survive store reload');
+});
+
+ok('truncate-after refuses stale direct-user identity and content', async () => {
+  const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], { id: 'edit-gui-truncate-after-stale' });
+  const before = panel.session.snapshotEvents();
+  for (const changed of [
+    { id: 'different-message', expected: 'QUESTION' },
+    { id: panel.user.id, expected: 'CHANGED' }
+  ]) {
+    const removed = await panel.answer(EDIT_METHODS.truncateAfter, {
+      sessionId: panel.sessionId, seq: panel.user.seq, ...changed
+    });
+    assert.equal(removed.body.result.value.ok, false, 'stale truncate-after was accepted');
+  }
+  assert.deepEqual(panel.session.snapshotEvents(), before);
+  assert.equal(panel.wire.editsFor(panel.sessionId).length, 0, 'a stale truncate-after wrote an overlay');
+});
+
 ok('the delete-message route refuses stale assistant identity and content', async () => {
   const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], { id: 'edit-gui-delete-message-stale' });
   const before = panel.session.snapshotEvents();
@@ -1662,19 +2156,20 @@ ok('the delete-message route refuses stale assistant identity and content', asyn
   assert.deepEqual(createEditStore().editsFor(panel.sessionId), [], 'a stale deletion persisted an overlay');
 });
 
-ok('the Host refuses edit and both deletion kinds while the agent is running', async () => {
+ok('the Host refuses edit and every destructive action while the agent is running even when legacy config disables the gate', async () => {
   const agent = { status: 'running' };
   const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], {
-    id: 'edit-gui-idle-guard', agent, editor: { requireIdle: true }
+    id: 'edit-gui-idle-guard', agent, editor: { requireIdle: false }
   });
   const before = panel.session.snapshotEvents();
   const payload = { sessionId: panel.sessionId, seq: panel.user.seq, id: panel.user.id, expected: 'QUESTION' };
   const edited = await panel.answer(EDIT_METHODS.commit, { ...payload, text: 'CHANGED' });
   const removed = await panel.answer(EDIT_METHODS.deleteTurn, payload);
+  const truncated = await panel.answer(EDIT_METHODS.truncateAfter, payload);
   const replyRemoved = await panel.answer(EDIT_METHODS.deleteMessage, {
     sessionId: panel.sessionId, seq: panel.reply.seq, id: panel.reply.id, expected: 'ANSWER'
   });
-  for (const result of [edited, removed, replyRemoved]) {
+  for (const result of [edited, removed, truncated, replyRemoved]) {
     assert.equal(result.body.result.value.ok, false);
     assert.match(String(result.body.result.value.reason), /stop generation/i);
   }
@@ -1682,17 +2177,17 @@ ok('the Host refuses edit and both deletion kinds while the agent is running', a
   assert.deepEqual(panel.session.snapshotEvents(), before, 'a generation guard failure mutated the session log');
 });
 
-ok('the Host guard resolves the running agent from the exact session registry', async () => {
+ok('the Host guard resolves the running agent from the exact session registry regardless of legacy config', async () => {
   const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], {
-    id: 'edit-gui-registry-idle-guard', hostAgent: { status: 'running' }, editor: { requireIdle: true }
+    id: 'edit-gui-registry-idle-guard', hostAgent: { status: 'running' }, editor: { requireIdle: false }
   });
-  const removed = await panel.answer(EDIT_METHODS.deleteTurn, {
-    sessionId: panel.sessionId, seq: panel.user.seq, id: panel.user.id, expected: 'QUESTION'
-  });
+  const userPayload = { sessionId: panel.sessionId, seq: panel.user.seq, id: panel.user.id, expected: 'QUESTION' };
+  const removed = await panel.answer(EDIT_METHODS.deleteTurn, userPayload);
+  const truncated = await panel.answer(EDIT_METHODS.truncateAfter, userPayload);
   const replyRemoved = await panel.answer(EDIT_METHODS.deleteMessage, {
     sessionId: panel.sessionId, seq: panel.reply.seq, id: panel.reply.id, expected: 'ANSWER'
   });
-  for (const result of [removed, replyRemoved]) {
+  for (const result of [removed, truncated, replyRemoved]) {
     assert.equal(result.body.result.value.ok, false, 'a direct RPC bypassed the Host generation guard');
     assert.match(String(result.body.result.value.reason), /stop generation/i);
   }
@@ -1803,35 +2298,70 @@ ok('a plain user message offers its text, once', () => {
   }]);
 });
 
-ok('a message that says nothing editable offers no target at all', () => {
+ok('a tool-only message exposes its concrete block as one target', () => {
   const shown = panelEntry(replyEntry([{ type: 'tool-call', id: 't1', name: 'read', arguments: '{"filePath":"a.js"}' }]));
-  assert.deepEqual(shown.targets, [], 'a tool call is not an answer');
-  assert.equal(shown.editable, false);
+  assert.equal(shown.targets.length, 1, 'the concrete tool target disappeared');
+  assert.equal(shown.targets[0].kind, 'tool-call');
+  assert.equal(shown.targets[0].label, 'Tool call');
+  assert.equal(shown.targets[0].editable, true);
+  assert.equal(shown.editable, true);
 });
 
-ok('a signed thinking block is offered, refused, and says why', () => {
+ok('a signed thinking block is offered for editing', () => {
   const entry = replyEntry([blockReasoning('SIGNED THINKING')], { source: signedSource });
   const shown = panelEntry(entry);
   assert.equal(shown.targets.length, 1, 'the thinking is not offered at all');
   assert.equal(shown.targets[0].signed, true, 'a signed thinking block is not marked signed');
-  assert.equal(shown.targets[0].editable, false, 'a signed thinking block must not be offered as editable');
-  // The refusal is the SHARED one: the same sentence a commit would answer with, which
-  // contains the wording `signedReasoningRefusal` produces rather than a new invention.
-  const shared = signedReasoningRefusal(entry.message, 0);
-  assert.equal(typeof shared, 'string', 'the fixture does not carry a signature at all');
-  assert.ok(String(shown.targets[0].reason).includes(shared), `the refusal does not quote the shared one: ${String(shown.targets[0].reason)}`);
-  assert.equal(shown.editable, false, 'the message-level answer must still refuse signed thinking');
-  assert.match(String(shown.reason), /signature|signed/u);
+  assert.equal(shown.targets[0].editable, true, 'a signed thinking block is not editable');
+  assert.equal(shown.targets[0].reason, undefined);
+  assert.equal(shown.editable, true, 'the message-level answer does not expose signed thinking');
 });
 
-ok('a signed thinking does not hide the answer beside it', () => {
-  // The two questions are DIFFERENT, and this is the shape that shows it: the reply as a
-  // whole is editable (through its text), its thinking is not.
+ok('a signed thinking and the answer beside it are both editable', () => {
   const shown = panelEntry(replyEntry([blockReasoning('SIGNED THINKING'), blockText('ANSWER')], { source: signedSource }));
   assert.equal(shown.editable, true, 'the answer of such a reply was refused');
-  assert.deepEqual(shown.targets.map((target) => [target.at, target.editable]), [[0, false], [1, true]]);
+  assert.deepEqual(shown.targets.map((target) => [target.at, target.editable]), [[0, true], [1, true]]);
   assert.deepEqual(shown.targets.map((target) => target.signed), [true, false]);
-  assert.equal(shown.targets[1].reason, undefined);
+  assert.deepEqual(shown.targets.map((target) => target.reason), [undefined, undefined]);
+});
+
+ok('signed thinking warns about provider-neutral conversion while redacted thinking stays visible and refused', () => {
+  const { badgeText, pinTargets } = panelConsts(injectEditor(PAGE), ['badgeText', 'targetsOf', 'fallbackTarget', 'pinTargets']);
+  const signed = panelEntry(replyEntry([blockReasoning('SIGNED THINKING')], { source: signedSource })).targets[0];
+  assert.equal(badgeText(signed), 'Editing signed thinking converts it to ordinary text');
+
+  const shown = panelEntry(replyEntry([{ ...blockReasoning('OPAQUE THINKING'), redacted: true }]));
+  assert.equal(shown.targets.length, 1, 'redacted thinking disappeared from the target list');
+  assert.equal(shown.targets[0].editable, false, 'redacted provider state became editable');
+  assert.match(shown.targets[0].reason, /cannot be rewritten/u);
+  assert.deepEqual(pinTargets(shown), [{ ...shown.targets[0], unavailable: true }],
+    'the transcript silently filtered the refused target instead of explaining it');
+  assert.ok(SCRIPT.includes("option.disabled = target.editable === false"),
+    'the panel picker does not render refused targets as disabled choices');
+  assert.ok(SCRIPT.includes("unavailableNote.className = 'why err'"),
+    'the panel does not visibly explain why a target is unavailable');
+  assert.ok(SCRIPT.includes("item.target.editable !== false && item.target.editStatus !== 'refused'"),
+    'an uneditable projection can still expose Copy');
+  assert.ok(SCRIPT.includes("item.target.editable === false || ['refused', 'mixed'].includes(item.target.editStatus)"),
+    'an unavailable projection is not styled as refused');
+
+  globalThis.__ctxkitUnavailableDocument = { createElement: (tag) => fakeElement(tag) };
+  const { PENCIL_ATTR, addPencil } = panelConsts(SCRIPT, ['PENCIL_ATTR', 'pinCss', 'keyOf', 'addPencil'],
+    'const document = globalThis.__ctxkitUnavailableDocument;');
+  const row = fakeElement('article');
+  const pin = addPencil(row, { seq: 9 }, { ...shown.targets[0], unavailable: true });
+  assert.equal(pin.hasAttribute(PENCIL_ATTR), false, 'a refused target is still marked as a clickable edit affordance');
+  assert.equal(pin.hasAttribute('data-ctxkit-unavailable'), true);
+  assert.deepEqual(pin.regions, [], 'a refused target still owns clickable native regions');
+  const status = pin.shadowRoot.children.find((child) => child.getAttribute?.('role') === 'status');
+  assert.ok(status, 'the unavailable marker is not a permanent status');
+  assert.equal(status.textContent, 'Unavailable: ' + shown.targets[0].reason);
+  assert.equal(pin.shadowRoot.children.some((child) => child.tagName === 'BUTTON'), false,
+    'the unavailable status still presents itself as an edit button');
+  const unavailableStyle = pin.shadowRoot.children.find((child) => child.tagName === 'STYLE').textContent;
+  assert.match(unavailableStyle, /:host\(\[data-unavailable\]\) \{ display: inline-flex; width: auto; height: auto/u,
+    'the unavailable status is still clipped to one pixel');
+  delete globalThis.__ctxkitUnavailableDocument;
 });
 
 ok('the rule asked about the DEFAULT block is the rule with no block at all', () => {
@@ -2007,7 +2537,7 @@ ok('a row draws one pencil per editable target, keyed by seq and block', () => {
   ], [
     'const document = globalThis.__ctxkitDocument;',
     'const installAffordance = () => {}; const setDeletedVisibility = () => {};',
-    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const placeDeleteAction = () => {};',
+    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const DELETE_STRIP_ATTR = "data-ctxkit-delete-strip"; const placeDeleteAction = () => {};',
     'const generationRunning = () => globalThis.__ctxkitGeneration.running; const STOP_GENERATION = "Generation is running. Stop generation before editing or deleting history."; const say = (message, kind) => globalThis.__ctxkitGeneration.notices.push([message, kind]);',
     'const getComputedStyle = () => ({ position: "static" });',
     'const projectRow = () => {};', // Display projection is driven by the full browser regression.
@@ -2106,7 +2636,7 @@ ok('a row draws one pencil per editable target, keyed by seq and block', () => {
     'a pencil without a block must open the message, not block 0');
 });
 
-ok('a pencil is not drawn for a target that cannot be rewritten', () => {
+ok('signed thinking receives the same per-block pencil as unsigned thinking', () => {
   const script = injectEditor(PAGE);
   const row = fakeElement('div');
   row.setAttribute('data-chat-flow-key', '14:assistant-step1:1');
@@ -2127,7 +2657,7 @@ ok('a pencil is not drawn for a target that cannot be rewritten', () => {
   ], [
     'const document = globalThis.__ctxkitDocument;',
     'const installAffordance = () => {}; const setDeletedVisibility = () => {};',
-    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const placeDeleteAction = () => {};',
+    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const DELETE_STRIP_ATTR = "data-ctxkit-delete-strip"; const placeDeleteAction = () => {};',
     'const generationRunning = () => globalThis.__ctxkitGeneration.running; const STOP_GENERATION = "Generation is running. Stop generation before editing or deleting history."; const say = (message, kind) => globalThis.__ctxkitGeneration.notices.push([message, kind]);',
     'const getComputedStyle = () => ({ position: "static" });',
     'const projectRow = () => {};',
@@ -2136,17 +2666,18 @@ ok('a pencil is not drawn for a target that cannot be rewritten', () => {
   ].join('\n'));
   const pins = () => row.querySelectorAll(':scope > [data-ctxkit-pencil]');
 
-  // A signed thinking alone: nothing editable, so no control that could only refuse.
+  // A signed thinking alone is editable after its stale provider signature is removed.
   STATE.sessionId = 'test-session';
   STATE.transcript = [panelEntry(replyEntry([blockReasoning('SIGNED THINKING')], { source: signedSource }))];
   decorateTranscript();
-  assert.equal(pins().length, 0, 'a pencil was drawn for a block the commit refuses');
+  assert.deepEqual(pins().map((pin) => pin.getAttribute('data-ctxkit-for')), ['15:0'],
+    'signed thinking did not receive its own pencil');
 
-  // A signed thinking BESIDE an answer: exactly one pencil, on the answer, block 1.
+  // A signed thinking beside an answer offers both blocks independently.
   STATE.transcript = [panelEntry(replyEntry([blockReasoning('SIGNED THINKING'), blockText('ANSWER')], { source: signedSource }))];
   decorateTranscript();
-  assert.deepEqual(pins().map((pin) => pin.getAttribute('data-ctxkit-for')), ['15:1'],
-    'the signed thinking got a pencil, or the answer lost one');
+  assert.deepEqual(pins().map((pin) => pin.getAttribute('data-ctxkit-for')), ['15:0', '15:1'],
+    'signed thinking or the adjacent answer lost its pencil');
 
   // A message the list no longer holds: the pencils go with it.
   STATE.transcript = [panelEntry(replyEntry([blockText('ANSWER')], { turn: 4, step: 4 }))];
@@ -2262,12 +2793,22 @@ ok('the block decides even when both blocks read the same string', async () => {
   assert.equal(other.wire.editsFor(other.sessionId)[0].cursor.block, 0);
 });
 
-ok('a commit on a signed thinking is refused and records nothing', async () => {
+ok('a commit on signed thinking downgrades it to replayable text without obsolete signatures', async () => {
   const panel = await mountedPanel([blockReasoning('SIGNED THINKING')], { id: 'edit-gui-signed', source: signedSource });
-  const value = (await commitOn(panel, { block: 0, text: 'anything at all' })).body.result.value;
-  assert.equal(value.ok, false, 'a signed thinking block was rewritten');
-  assert.match(String(value.reason), /signature|signed/u, 'the refusal does not explain itself');
-  assert.equal(panel.wire.editsFor(panel.sessionId).length, 0, 'a refused commit recorded an edit anyway');
+  const value = (await commitOn(panel, { block: 0, text: 'thinking I changed' })).body.result.value;
+  assert.equal(value.ok, true, JSON.stringify(value));
+  const rewritten = planWireRewrite(panel.session.deriveMessages(), panel.wire.editsFor(panel.sessionId));
+  assert.equal(rewritten.ok, true, JSON.stringify(rewritten.refused));
+  const reply = rewritten.messages.find((message) => message.role === 'assistant');
+  assert.equal(reply.content[0].type, 'text', 'signed reasoning was not downgraded to provider-neutral text');
+  assert.equal(reply.content[0].text, 'thinking I changed');
+  for (const field of ['signature', 'thinkingSignature', 'thoughtSignature']) {
+    assert.equal(reply.content[0][field], undefined, `obsolete ${field} stayed on the edited block`);
+  }
+  assert.equal(reply.source?.replayState?.blocks?.[0]?.type, 'text',
+    'the replay state did not follow the provider-neutral downgrade');
+  assert.equal(reply.source?.replayState?.blocks?.[0]?.thinkingSignature, undefined,
+    'the replay state kept the signature of the old thinking');
 });
 
 ok('a block index the message does not have, or one that is not an index, is refused', async () => {

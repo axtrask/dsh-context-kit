@@ -25,6 +25,7 @@ process.env.XDG_CONFIG_HOME = join(scratchHome, 'xdg');
 process.env.OPENCODE_CONFIG_DIR = join(scratchHome, 'opencode');
 
 const edit = await import(`${new URL('../lib/edit.js', import.meta.url).href}`);
+const { convertResponsesMessages } = await import('@earendil-works/pi-ai/api/openai-responses-shared');
 
 const failures = [];
 function check(name, ok, detail = '') {
@@ -91,6 +92,54 @@ check(
   edit.editableTextOf(result('c1', 'BODY')) === 'BODY',
   edit.editableTextOf(result('c1', 'BODY'))
 );
+const compositeResult = {
+  type: 'tool-result', toolCallId: 'composite', isError: false, providerMeta: { keep: true },
+  content: [
+    { type: 'image', data: 'before' },
+    { type: 'text', text: 'FIRST', mediaType: 'text/plain' },
+    { type: 'json', value: { untouched: true } },
+    { type: 'text', text: 'SECOND' }
+  ]
+};
+check(
+  'a tool-result exposes the aggregate of every nested text string',
+  edit.editableTextOf(compositeResult) === 'FIRSTSECOND',
+  String(edit.editableTextOf(compositeResult))
+);
+const compositeRewrite = edit.applyEditToMessage(
+  { id: 'tool-envelope', role: 'user', content: [compositeResult], envelopeMeta: 'keep' },
+  { before: 'FIRSTSECOND', after: 'ONE REPLACEMENT' },
+  0,
+  0
+);
+const rewrittenNested = compositeRewrite?.content?.[0]?.content ?? [];
+check(
+  'editing an aggregate tool-result leaves exactly one text item at the first text position',
+  rewrittenNested.filter((item) => item?.type === 'text').length === 1
+    && rewrittenNested[1]?.type === 'text'
+    && rewrittenNested[1]?.text === 'ONE REPLACEMENT',
+  JSON.stringify(rewrittenNested)
+);
+check(
+  'editing a tool-result preserves every non-text item and outer metadata',
+  rewrittenNested[0] === compositeResult.content[0]
+    && rewrittenNested[2] === compositeResult.content[2]
+    && compositeRewrite.envelopeMeta === 'keep'
+    && compositeRewrite.content[0].providerMeta.keep === true
+    && compositeRewrite.content[0].isError === false,
+  JSON.stringify(compositeRewrite)
+);
+const nonTextResult = {
+  type: 'tool-result', toolCallId: 'binary-only', content: [{ type: 'image', data: 'only-image' }], marker: 'keep'
+};
+const nonTextRewrite = edit.applyEditToMessage(
+  { role: 'user', content: [nonTextResult] },
+  { before: '', after: 'MUST NOT APPEAR' },
+  0,
+  0
+);
+check('a non-text-only tool-result exposes no editable text', edit.editableTextOf(nonTextResult) === undefined);
+check('editing a non-text-only tool-result does not invent text', nonTextRewrite === undefined, JSON.stringify(nonTextRewrite));
 check('an image block exposes nothing', edit.editableTextOf({ type: 'image', data: 'x' }) === undefined);
 check('a null block exposes nothing', edit.editableTextOf(null) === undefined);
 
@@ -394,6 +443,35 @@ check('removing an unknown edit is refused', store2.remove('undo-test', 'nope').
 store2.record('undo-test', userMessage('u1', text('one')), 'two', { messageIndex: 0 });
 const cleared = store2.clear('undo-test');
 check('a session can be cleared', cleared.ok === true && cleared.removed === 1, JSON.stringify(cleared));
+check('clearing removes persisted state instead of resurrecting it after restart',
+  !existsSync(edit.editStatePath('undo-test')) && edit.createEditStore().editsFor('undo-test').length === 0);
+
+let rejectWrites = true;
+const transactionalStore = edit.createEditStore({
+  restore: false,
+  save: () => {
+    if (rejectWrites) throw new Error('simulated persistence failure');
+  }
+});
+let persistenceFailure;
+try {
+  transactionalStore.record('transactional', userMessage('u-tx', text('before')), 'after', { messageIndex: 0 });
+} catch (error) {
+  persistenceFailure = error;
+}
+check('a persistence failure does not publish an edit in memory',
+  /simulated persistence failure/u.test(String(persistenceFailure))
+    && transactionalStore.editsFor('transactional').length === 0,
+  JSON.stringify(transactionalStore.editsFor('transactional')));
+rejectWrites = false;
+const retriedTransaction = transactionalStore.record(
+  'transactional', userMessage('u-tx', text('before')), 'after', { messageIndex: 0 }
+);
+check('a failed save consumes neither ordering nor edit ids',
+  retriedTransaction.ok === true
+    && retriedTransaction.edit?.at === 1
+    && retriedTransaction.edit?.id === 'transact-e1',
+  JSON.stringify(retriedTransaction));
 check('the store tracks sessions separately', store2.editsFor('other-session').length === 0, '');
 check('the store counts its sessions', store2.sessionCount() === 2, String(store2.sessionCount()));
 
@@ -475,23 +553,32 @@ check('the request survives the refusal', absent.messages.length === 1, String(a
 
 /* ------------------------------------------- 11. the model's own thinking (CoT) */
 
-// A reasoning block is the model's chain of thought. DeepSeek passes it back as plain
-// text, so rewriting it is safe there; the Anthropic-family adapter signs it and checks
-// nothing, so rewriting a signed one is refused. Both halves are asserted here, because
-// the failure mode of getting this wrong is silent: the wrong branch of
-// `applyEditToMessage` reports a successful edit and changes nothing the provider reads.
+// A reasoning block is the model's chain of thought. Some providers attach signatures to
+// the visible or replay-state block. Rewriting signed, non-redacted text is safe only when
+// every stale signature is removed; redacted thinking is still refused. The signed and
+// unsigned paths are both asserted because the failure mode is silent: a rewrite can report
+// success while leaving either the text or stale provider metadata in place.
 
 const reasoning = (value) => ({ type: 'reasoning', text: value });
 const deepseekReply = assistantMessage('r1', reasoning('THE THINKING'), text('THE ANSWER'));
 const signedReply = {
-  ...assistantMessage('r2', reasoning('SIGNED THINKING')),
+  ...assistantMessage('r2', {
+    ...reasoning('SIGNED THINKING'),
+    signature: 'VISIBLE-SIGNATURE',
+    thoughtSignature: 'VISIBLE-THOUGHT-SIGNATURE',
+    textSignature: 'VISIBLE-TEXT-SIGNATURE'
+  }),
   source: {
     kind: 'model',
     provider: 'pi',
     model: 'claude',
     replayState: {
       response: { kind: 'pi-ai', version: 2, api: 'anthropic-messages', provider: 'pi', model: 'claude', stopReason: 'stop' },
-      blocks: [{ type: 'reasoning', thinkingSignature: 'SIG-over-the-old-thinking' }]
+      blocks: [{
+        type: 'reasoning',
+        thinkingSignature: 'SIG-over-the-old-thinking',
+        textSignature: 'TEXT-SIG-over-the-old-thinking'
+      }]
     }
   }
 };
@@ -533,21 +620,144 @@ check(
 
 const signedStore = edit.createEditStore({ restore: false });
 const signedRecord = signedStore.record('cot-signed', signedReply, 'SIGNED THINKING, CORRECTED', { messageIndex: 0, expected: 'SIGNED THINKING' });
-check('recording an edit over SIGNED thinking is refused', signedRecord.ok === false, JSON.stringify(signedRecord.reason ?? signedRecord.edit?.id ?? ''));
-check('the refusal names the signature', /signed|signature/u.test(String(signedRecord.reason)), String(signedRecord.reason));
-// And the apply end refuses too, so a hand-written or restored record cannot get in.
-const handMade = {
-  id: 'hand-made',
-  scope: 'text',
-  cursor: { message: 0, block: 0 },
-  before: 'SIGNED THINKING',
-  after: 'SIGNED THINKING, CORRECTED',
-  at: 1,
-  anchor: edit.messageAnchor(signedReply, 0)
+check('recording an edit over SIGNED non-redacted thinking succeeds', signedRecord.ok === true, JSON.stringify(signedRecord.reason ?? signedRecord.edit?.id ?? ''));
+check('the signed reasoning cursor is recorded', signedRecord.edit?.cursor.block === 0, String(signedRecord.edit?.cursor.block));
+const signedPlan = edit.planWireRewrite([signedReply], [signedRecord.edit]);
+const signedBlock = signedPlan.messages[0]?.content?.[0];
+const signedReplayBlock = signedPlan.messages[0]?.source?.replayState?.blocks?.[0];
+check('the wire rewrite applies an edit of signed thinking', signedPlan.changed === true && signedPlan.refused.length === 0 && signedBlock?.text === 'SIGNED THINKING, CORRECTED', JSON.stringify(signedPlan.refused.map((r) => r.reason)));
+check(
+  'signed reasoning is downgraded to replayable ordinary text without stale signatures',
+  signedBlock?.type === 'text'
+    && signedBlock?.signature === undefined
+    && signedBlock?.thinkingSignature === undefined
+    && signedBlock?.thoughtSignature === undefined
+    && signedBlock?.textSignature === undefined,
+  JSON.stringify(signedBlock)
+);
+check(
+  'the replay-state carrier is downgraded with the signed reasoning',
+  signedReplayBlock?.type === 'text'
+    && signedReplayBlock?.signature === undefined
+    && signedReplayBlock?.thinkingSignature === undefined
+    && signedReplayBlock?.thoughtSignature === undefined
+    && signedReplayBlock?.textSignature === undefined,
+  JSON.stringify(signedReplayBlock)
+);
+check(
+  'the signed source message remains immutable',
+  signedReply.content[0].signature === 'VISIBLE-SIGNATURE'
+    && signedReply.content[0].thoughtSignature === 'VISIBLE-THOUGHT-SIGNATURE'
+    && signedReply.content[0].textSignature === 'VISIBLE-TEXT-SIGNATURE'
+    && signedReply.source.replayState.blocks[0].thinkingSignature === 'SIG-over-the-old-thinking'
+    && signedReply.source.replayState.blocks[0].textSignature === 'TEXT-SIG-over-the-old-thinking',
+  JSON.stringify(signedReply)
+);
+const textSignatureOnly = edit.applyEditToMessage(
+  assistantMessage('text-signature-only', { ...reasoning('OLD'), textSignature: 'VISIBLE-ONLY' }),
+  { before: 'OLD', after: 'NEW' },
+  0,
+  0
+);
+check(
+  'textSignature alone marks visible reasoning as signed and is stripped on conversion',
+  textSignatureOnly?.content?.[0]?.type === 'text'
+    && textSignatureOnly.content[0].text === 'NEW'
+    && textSignatureOnly.content[0].textSignature === undefined,
+  JSON.stringify(textSignatureOnly)
+);
+const replayTextSignatureOnly = edit.applyEditToMessage({
+  ...assistantMessage('replay-text-signature-only', reasoning('OLD REPLAY')),
+  source: { replayState: { blocks: [{ type: 'reasoning', textSignature: 'REPLAY-ONLY' }] } }
+}, { before: 'OLD REPLAY', after: 'NEW REPLAY' }, 0, 0);
+check(
+  'same-index replay textSignature alone triggers signed conversion and is stripped',
+  replayTextSignatureOnly?.content?.[0]?.type === 'text'
+    && replayTextSignatureOnly.source.replayState.blocks[0].type === 'text'
+    && replayTextSignatureOnly.source.replayState.blocks[0].textSignature === undefined,
+  JSON.stringify(replayTextSignatureOnly)
+);
+
+const openAiSignedReply = {
+  ...assistantMessage('r-openai-signed', reasoning('OPENAI SIGNED THINKING')),
+  source: {
+    kind: 'model', provider: 'openai', model: 'gpt-5',
+    replayState: {
+      response: {
+        kind: 'pi-ai', version: 2, api: 'openai-responses', provider: 'openai', model: 'gpt-5', stopReason: 'stop'
+      },
+      blocks: [{
+        type: 'reasoning',
+        thinkingSignature: JSON.stringify({ type: 'reasoning', id: 'rs_old', summary: [] })
+      }]
+    }
+  }
 };
-const handPlan = edit.planWireRewrite([signedReply], [handMade]);
-check('the wire rewrite refuses an edit of signed thinking', handPlan.changed === false && handPlan.refused.length === 1, JSON.stringify(handPlan.refused.map((r) => r.reason)));
-check('and the refusal is reported, not empty', /signature|signed/u.test(String(handPlan.refused[0]?.reason)), String(handPlan.refused[0]?.reason));
+const openAiRecord = signedStore.record(
+  'cot-openai-signed', openAiSignedReply, 'OPENAI SIGNED THINKING, CORRECTED',
+  { messageIndex: 0, expected: 'OPENAI SIGNED THINKING' }
+);
+const openAiPlan = openAiRecord.ok
+  ? edit.planWireRewrite([openAiSignedReply], [openAiRecord.edit])
+  : { messages: [] };
+const openAiWireBlock = openAiPlan.messages[0]?.content?.[0];
+const openAiInput = openAiWireBlock?.type === 'text'
+  ? convertResponsesMessages({
+    provider: 'openai', api: 'openai-responses', id: 'gpt-5', input: ['text'], output: ['text'], reasoning: true, compat: {}
+  }, {
+    messages: [{
+      role: 'assistant', content: [{ type: 'text', text: openAiWireBlock.text }],
+      api: 'openai-responses', provider: 'openai', model: 'gpt-5', stopReason: 'stop', timestamp: 0,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
+    }]
+  }, new Set(['openai']))
+  : [];
+check(
+  'edited signed OpenAI reasoning survives the Responses serializer as ordinary assistant text',
+  openAiRecord.ok === true
+    && openAiWireBlock?.type === 'text'
+    && openAiInput.some((item) => item?.type === 'message'
+      && item.content?.some((part) => part?.text === 'OPENAI SIGNED THINKING, CORRECTED')),
+  JSON.stringify({ record: openAiRecord.reason, block: openAiWireBlock, input: openAiInput })
+);
+
+const explicitlyUnredactedReply = {
+  ...signedReply,
+  id: 'r2-explicitly-unredacted',
+  content: [{ ...signedReply.content[0], redacted: false }],
+  source: {
+    ...signedReply.source,
+    replayState: {
+      ...signedReply.source.replayState,
+      blocks: [{ ...signedReply.source.replayState.blocks[0], redacted: false }]
+    }
+  }
+};
+const explicitlyUnredactedRecord = signedStore.record(
+  'cot-signed-explicitly-unredacted',
+  explicitlyUnredactedReply,
+  'EXPLICITLY UNREDACTED THINKING, CORRECTED',
+  { messageIndex: 0, expected: 'SIGNED THINKING' }
+);
+const explicitlyUnredactedPlan = explicitlyUnredactedRecord.ok
+  ? edit.planWireRewrite([explicitlyUnredactedReply], [explicitlyUnredactedRecord.edit])
+  : { changed: false, refused: [{ reason: explicitlyUnredactedRecord.reason }], messages: [] };
+check(
+  'redacted false is editable rather than treated as redacted provider state',
+  explicitlyUnredactedRecord.ok === true
+    && explicitlyUnredactedPlan.changed === true
+    && explicitlyUnredactedPlan.refused.length === 0
+    && explicitlyUnredactedPlan.messages[0]?.content?.[0]?.text === 'EXPLICITLY UNREDACTED THINKING, CORRECTED',
+  JSON.stringify(explicitlyUnredactedPlan.refused)
+);
+const redactedReply = {
+  ...assistantMessage('r-redacted', reasoning('VISIBLE PLACEHOLDER')),
+  source: { replayState: { blocks: [{ type: 'reasoning', redacted: 'OPAQUE PROVIDER STATE' }] } }
+};
+const redactedRecord = signedStore.record('cot-redacted', redactedReply, 'SHOULD NOT APPLY', { messageIndex: 0, expected: 'VISIBLE PLACEHOLDER' });
+check('recording an edit over redacted thinking is refused', redactedRecord.ok === false, JSON.stringify(redactedRecord));
+check('the redacted refusal names the unavailable provider text', /redacted|not what the provider receives/u.test(String(redactedRecord.reason)), String(redactedRecord.reason));
+const handMade = signedRecord.edit;
 // The same hand-made record against unsigned thinking of the same shape must go through -
 // otherwise the check above would pass for the wrong reason. Its anchor is built from THIS
 // message: an anchor of the signed one describes a different shape and would be refused
@@ -1037,6 +1247,328 @@ check('assistant deletion chains after an effective edit and removes the edited 
   layeredAssistantPlan.ok && layeredAssistantPlan.applied.length === 2
     && layeredAssistantPlan.messages.map((message) => message.id).join(',') === 'layered-u,layered-next',
   JSON.stringify(layeredAssistantPlan));
+
+/* --------------------------------------- prepared truncate-anchor transactions */
+
+const transactionHistory = (prefix, anchorText = 'Retained question') => [
+  userMessage(`${prefix}-anchor`, text(anchorText)),
+  assistantMessage(`${prefix}-answer`, text('Answer to remove')),
+  userMessage(`${prefix}-next`, text('Later turn'))
+];
+const replacementFor = (id, body) => ({
+  id,
+  role: 'user',
+  content: [text(body)],
+  source: { kind: 'plugin:context-kit-editor' }
+});
+const eventSession = (id, messages) => ({
+  id,
+  snapshotEvents() {
+    return messages.map((message, seq) => ({ seq, data: message }));
+  }
+});
+
+const realTransactionSession = 'prepared-real-files';
+const realHistory = transactionHistory('prepared-real');
+const realStore = edit.createEditStore();
+const realTruncate = realStore.truncateAfter(realTransactionSession, realHistory, {
+  messageIndex: 0,
+  messageId: realHistory[0].id,
+  expected: 'Retained question'
+});
+const realMainPath = edit.editStatePath(realTransactionSession);
+const realJournalPath = edit.editTransactionPath(realTransactionSession);
+const realBaseDocument = readFileSync(realMainPath, 'utf8');
+const realReplacement = replacementFor('prepared-real-replacement', 'Edited retained question');
+const realPrepared = realStore.prepareTruncateAnchorRebase(
+  realTransactionSession,
+  realHistory[0].id,
+  realReplacement
+);
+check('preparing a real rebase writes a separate journal', realTruncate.ok === true
+  && realPrepared.ok === true && existsSync(realJournalPath));
+check('preparing keeps the real main edit document and memory on the old state',
+  readFileSync(realMainPath, 'utf8') === realBaseDocument
+    && realStore.editsFor(realTransactionSession)[0]?.messageId === realHistory[0].id);
+
+const restartedRealStore = edit.createEditStore();
+check('restart hydration exposes the old side until recovery',
+  restartedRealStore.editsFor(realTransactionSession)[0]?.messageId === realHistory[0].id);
+const realRecovery = restartedRealStore.recoverPrepared(
+  realTransactionSession,
+  eventSession(realTransactionSession, [realReplacement])
+);
+const recoveredRealDocument = JSON.parse(readFileSync(realMainPath, 'utf8'));
+check('restart recovery commits when the replacement is durable', realRecovery.ok === true
+  && realRecovery.action === 'committed'
+  && recoveredRealDocument.edits[0]?.messageId === realReplacement.id
+  && restartedRealStore.editsFor(realTransactionSession)[0]?.messageId === realReplacement.id
+  && !existsSync(realJournalPath));
+
+const rollbackTransactionSession = 'prepared-real-rollback';
+const rollbackHistory = transactionHistory('prepared-rollback');
+const rollbackStore = edit.createEditStore();
+rollbackStore.truncateAfter(rollbackTransactionSession, rollbackHistory, {
+  messageIndex: 0,
+  messageId: rollbackHistory[0].id,
+  expected: 'Retained question'
+});
+const rollbackMainPath = edit.editStatePath(rollbackTransactionSession);
+const rollbackBaseDocument = JSON.parse(readFileSync(rollbackMainPath, 'utf8'));
+const rollbackReplacement = replacementFor('prepared-rollback-replacement', 'Uncommitted question');
+rollbackStore.prepareTruncateAnchorRebase(
+  rollbackTransactionSession,
+  rollbackHistory[0].id,
+  rollbackReplacement
+);
+const restartedRollbackStore = edit.createEditStore();
+const rollbackRecovery = restartedRollbackStore.recoverPrepared(
+  rollbackTransactionSession,
+  eventSession(rollbackTransactionSession, [])
+);
+check('restart recovery rolls back when the replacement is absent', rollbackRecovery.ok === true
+  && rollbackRecovery.action === 'rolled-back'
+  && JSON.stringify(JSON.parse(readFileSync(rollbackMainPath, 'utf8')).edits)
+    === JSON.stringify(rollbackBaseDocument.edits)
+  && restartedRollbackStore.editsFor(rollbackTransactionSession)[0]?.messageId === rollbackHistory[0].id
+  && !existsSync(edit.editTransactionPath(rollbackTransactionSession)));
+
+const unreadableHistory = transactionHistory('unreadable');
+const unreadableStore = edit.createEditStore({
+  restore: false,
+  save() {},
+  savePrepared() {},
+  clearPrepared() { return true; }
+});
+unreadableStore.truncateAfter('prepared-unreadable', unreadableHistory, {
+  messageIndex: 0,
+  messageId: unreadableHistory[0].id,
+  expected: 'Retained question'
+});
+const unreadablePrepared = unreadableStore.prepareTruncateAnchorRebase(
+  'prepared-unreadable',
+  unreadableHistory[0].id,
+  replacementFor('unreadable-replacement', 'Unreadable replacement')
+);
+const unreadableRecovery = unreadableStore.recoverPrepared('prepared-unreadable', {
+  id: 'prepared-unreadable',
+  surface: { nodes: [0] }
+});
+check('recovery refuses a surface whose events cannot be inspected', unreadableRecovery.ok === false
+  && /neither a readable surface nor an enumerable event log/u.test(unreadableRecovery.reason)
+  && unreadableStore.clear('prepared-unreadable').ok === false);
+check('an unreadable recovery leaves the prepared transaction available to its owner',
+  unreadablePrepared.rollback().ok === true);
+
+const memoryMain = new Map();
+const memoryJournals = new Map();
+const memoryStore = edit.createEditStore({
+  restore: false,
+  save(sessionId, state) { memoryMain.set(sessionId, { edits: [...state.edits] }); },
+  savePrepared(sessionId, transaction) {
+    if (memoryJournals.has(sessionId)) throw new Error('duplicate prepared transaction');
+    memoryJournals.set(sessionId, transaction);
+  },
+  loadPrepared(sessionId) {
+    return { transaction: memoryJournals.get(sessionId), problems: [], present: memoryJournals.has(sessionId) };
+  },
+  clearPrepared(sessionId, transactionId) {
+    if (memoryJournals.get(sessionId)?.id !== transactionId) return false;
+    memoryJournals.delete(sessionId);
+    return true;
+  }
+});
+const observerSession = 'prepared-observer';
+const observerHistory = transactionHistory('observer');
+const observerTruncate = memoryStore.truncateAfter(observerSession, observerHistory, {
+  messageIndex: 0,
+  messageId: observerHistory[0].id,
+  expected: 'Retained question'
+});
+const observerReplacement = replacementFor('observer-replacement', 'Observer-safe question');
+const observerPrepared = memoryStore.prepareTruncateAnchorRebase(
+  observerSession,
+  observerHistory[0].id,
+  observerReplacement
+);
+const observerRefusals = [
+  memoryStore.record(observerSession, observerHistory[0], 'mutated', { messageIndex: 0 }),
+  memoryStore.deleteTurn(observerSession, observerHistory, { messageIndex: 0 }),
+  memoryStore.deleteMessage(observerSession, observerHistory, { messageIndex: 1 }),
+  memoryStore.truncateAfter(observerSession, observerHistory, { messageIndex: 0 }),
+  memoryStore.prepareTruncateAnchorRebase(observerSession, observerHistory[0].id, observerReplacement),
+  memoryStore.rebaseTruncateAnchors(observerSession, observerHistory[0].id, observerReplacement),
+  memoryStore.remove(observerSession, observerTruncate.edit?.id),
+  memoryStore.clear(observerSession),
+  memoryStore.recordApplied(observerSession, [{ id: 'observer-write' }])
+];
+const unrelatedObserverWrite = memoryStore.record(
+  'prepared-unrelated',
+  userMessage('unrelated-message', text('Unrelated original')),
+  'Unrelated edit',
+  { messageIndex: 0, messageId: 'unrelated-message' }
+);
+check('a synchronous append observer is refused by every same-session mutator',
+  observerPrepared.ok === true && observerRefusals.every((answer) => answer?.ok === false
+    && /pending recovery/u.test(answer.reason)), JSON.stringify(observerRefusals));
+check('a pending transaction does not block another session', unrelatedObserverWrite.ok === true);
+const observerCommit = observerPrepared.commit();
+check('observer reentrancy cannot cause a lost rebase update', observerCommit.ok === true
+  && memoryStore.editsFor(observerSession).length === 1
+  && memoryStore.editsFor(observerSession)[0]?.messageId === observerReplacement.id);
+
+const secondReplacement = replacementFor('observer-replacement-2', 'Second observer-safe question');
+const secondPrepared = memoryStore.prepareTruncateAnchorRebase(
+  observerSession,
+  observerReplacement.id,
+  secondReplacement
+);
+const staleCommit = observerPrepared.commit();
+const staleRollback = observerPrepared.rollback();
+check('stale transaction closures cannot settle a newer transaction', secondPrepared.ok === true
+  && staleCommit.ok === false && staleRollback.ok === false
+  && memoryJournals.get(observerSession)?.id === secondPrepared.transactionId
+  && memoryStore.editsFor(observerSession)[0]?.messageId === observerReplacement.id);
+check('the current transaction can still settle after stale attempts', secondPrepared.rollback().ok === true
+  && !memoryJournals.has(observerSession));
+
+let failCandidateSave = false;
+const failureMain = new Map();
+const failureJournals = new Map();
+const failureStore = edit.createEditStore({
+  restore: false,
+  save(sessionId, state) {
+    if (failCandidateSave) throw new Error('injected main persistence failure');
+    failureMain.set(sessionId, { edits: [...state.edits] });
+  },
+  savePrepared(sessionId, transaction) { failureJournals.set(sessionId, transaction); },
+  loadPrepared(sessionId) {
+    return { transaction: failureJournals.get(sessionId), problems: [], present: failureJournals.has(sessionId) };
+  },
+  clearPrepared(sessionId, transactionId) {
+    if (failureJournals.get(sessionId)?.id !== transactionId) return false;
+    failureJournals.delete(sessionId);
+    return true;
+  }
+});
+const failureSession = 'prepared-persistence-failure';
+const failureHistory = transactionHistory('failure');
+failureStore.truncateAfter(failureSession, failureHistory, {
+  messageIndex: 0,
+  messageId: failureHistory[0].id,
+  expected: 'Retained question'
+});
+const failureReplacement = replacementFor('failure-replacement', 'Durable replacement');
+const failurePrepared = failureStore.prepareTruncateAnchorRebase(
+  failureSession,
+  failureHistory[0].id,
+  failureReplacement
+);
+failCandidateSave = true;
+let candidateSaveError;
+try {
+  failurePrepared.commit();
+} catch (error) {
+  candidateSaveError = error;
+}
+check('candidate persistence failure leaves old memory and the journal pending',
+  /injected main persistence failure/u.test(candidateSaveError?.message ?? '')
+    && failureStore.editsFor(failureSession)[0]?.messageId === failureHistory[0].id
+    && failureJournals.has(failureSession));
+check('candidate persistence failure keeps same-session writes locked',
+  failureStore.clear(failureSession).ok === false);
+failCandidateSave = false;
+const recoveredFailure = failureStore.recoverPrepared(
+  failureSession,
+  eventSession(failureSession, [failureReplacement])
+);
+check('a failed candidate persistence can be recovered from the durable replacement',
+  recoveredFailure.ok === true && recoveredFailure.action === 'committed'
+    && failureStore.editsFor(failureSession)[0]?.messageId === failureReplacement.id
+    && failureMain.get(failureSession)?.edits[0]?.messageId === failureReplacement.id
+    && !failureJournals.has(failureSession));
+
+const cleanupProblems = [];
+const cleanupHistory = transactionHistory('cleanup');
+const cleanupStore = edit.createEditStore({
+  restore: false,
+  save() {},
+  savePrepared() {},
+  clearPrepared() { throw new Error('injected rollback cleanup failure'); },
+  onProblem(_sessionId, problem) { cleanupProblems.push(problem); }
+});
+cleanupStore.truncateAfter('prepared-cleanup', cleanupHistory, {
+  messageIndex: 0,
+  messageId: cleanupHistory[0].id,
+  expected: 'Retained question'
+});
+const cleanupPrepared = cleanupStore.prepareTruncateAnchorRebase(
+  'prepared-cleanup',
+  cleanupHistory[0].id,
+  replacementFor('cleanup-replacement', 'Cleanup replacement')
+);
+let cleanupResult;
+let cleanupThrew = false;
+try {
+  cleanupResult = cleanupPrepared.rollback();
+} catch {
+  cleanupThrew = true;
+}
+check('rollback cleanup failure is reported without masking an append failure', !cleanupThrew
+  && cleanupResult.ok === false
+  && /cleanup failure/u.test(cleanupProblems[0] ?? '')
+  && cleanupStore.editsFor('prepared-cleanup')[0]?.messageId === cleanupHistory[0].id
+  && cleanupStore.recordApplied('prepared-cleanup', []).ok === false);
+
+const wireMain = new Map();
+const wireJournals = new Map();
+const wireStore = edit.createEditStore({
+  restore: false,
+  save(sessionId, state) { wireMain.set(sessionId, { edits: [...state.edits] }); },
+  savePrepared(sessionId, transaction) { wireJournals.set(sessionId, transaction); },
+  loadPrepared(sessionId) {
+    return { transaction: wireJournals.get(sessionId), problems: [], present: wireJournals.has(sessionId) };
+  },
+  clearPrepared(sessionId, transactionId) {
+    if (wireJournals.get(sessionId)?.id !== transactionId) return false;
+    wireJournals.delete(sessionId);
+    return true;
+  }
+});
+const wireSessionId = 'prepared-wire-recovery';
+const wireHistory = transactionHistory('wire');
+wireStore.truncateAfter(wireSessionId, wireHistory, {
+  messageIndex: 0,
+  messageId: wireHistory[0].id,
+  expected: 'Retained question'
+});
+const wireReplacement = replacementFor('wire-replacement', 'Wire replacement');
+wireStore.prepareTruncateAnchorRebase(wireSessionId, wireHistory[0].id, wireReplacement);
+let wireListener;
+const fakeWireRoot = {
+  on(event, listener) {
+    if (event === 'llm/stream') wireListener = listener;
+    return () => { wireListener = undefined; };
+  }
+};
+const disposeWire = edit.installWireOverlay(fakeWireRoot, wireStore);
+let rewrittenWireRequest;
+const wireResult = wireListener.call({
+  stream(request) {
+    rewrittenWireRequest = request;
+    return 'wire-rewritten';
+  }
+}, {
+  sessionId: wireSessionId,
+  session: eventSession(wireSessionId, [wireReplacement]),
+  messages: [wireReplacement, wireHistory[1], wireHistory[2]]
+}, () => 'wire-unchanged');
+disposeWire();
+check('wire overlay recovers a prepared journal before reading edits', wireResult === 'wire-rewritten'
+  && rewrittenWireRequest?.messages.length === 1
+  && rewrittenWireRequest.messages[0]?.id === wireReplacement.id
+  && wireStore.editsFor(wireSessionId)[0]?.messageId === wireReplacement.id
+  && !wireJournals.has(wireSessionId));
 
 console.log(`\n${failures.length === 0 ? 'all edit behaviour tests passed' : `${failures.length} FAILURES: ${failures.join('; ')}`}`);
 process.exit(failures.length === 0 ? 0 : 1);

@@ -33,7 +33,7 @@ const fixtures = () => [
   entry(8, [target(0, 'text', 'QUESTION', { label: 'Message' })], { type: 'user/message', userIndex: 0, id: 'u1', originId: 'u1', branch: 'durable' }),
   entry(15, [target(0, 'reasoning', '**THINK A**\nsecond line'), target(2, 'text', 'ANSWER')]),
   entry(16, [target(0, 'reasoning', 'ONLY THINK')]),
-  entry(17, [target(0, 'reasoning', 'SIGNED', { editable: false, signed: true }), target(1, 'text', 'SAFE')]),
+  entry(17, [target(0, 'reasoning', 'SIGNED', { signed: true }), target(1, 'text', 'SAFE')]),
 ];
 const image = '<img alt="kept image" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">';
 // Actual slot boundary and both installed CSS-module token formats, without matching aliases.
@@ -383,11 +383,14 @@ try {
     state.sessions.A.splice(0, 1); await refresh(); await settle();
     const unavailable = chat.locator('[data-ctxkit-unavailable]');
     assert.equal(await unavailable.count(), 1, 'an unavailable row must still carry its marker');
-    // Its own text is the control, like every other target: it must explain why instead of doing
-    // nothing. The collapsed button keeps the keyboard path; this is the pointer one.
-    await unavailable.evaluate((n) => n.regions[0].dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 })));
-    await new Promise((resolve) => setTimeout(resolve, 320));
-    assert.match(await page.locator('#dsh-context-kit-editor .notice').innerText(), /not among the messages/i);
+    assert.match(await unavailable.evaluate((n) => n.shadowRoot.textContent), /^Unavailable: .*not among the messages/is,
+      'the unavailable reason is not permanently visible');
+    assert.equal(await unavailable.getAttribute('data-ctxkit-pencil'), null,
+      'an unavailable row is still a clickable edit affordance');
+    assert.equal(await unavailable.evaluate((n) => n.regions.length), 0);
+    const disabled = chat.locator('[data-ctxkit-delete] button');
+    assert.equal(await disabled.count(), 2, 'the unmatched user row lost its destructive controls');
+    assert.equal(await disabled.evaluateAll((buttons) => buttons.every((button) => button.disabled)), true);
     assert.equal(state.commits.length, 0);
   });
   for (const width of [1280, 390]) for (const kind of ['user', 'answer']) await check(`Native unified: ${kind} bounded editing and exact cancel at ${width}px`, async ({ page, chat, state, refresh, settle }) => {
@@ -1335,7 +1338,7 @@ try {
     await chat.evaluate((flow, html) => flow.insertAdjacentHTML('beforeend', html), assistantRow(17));
     await refresh(); await settle();
     assert.deepEqual(await chat.locator('._markdown_kcgor_5, .other_markdown').allTextContents(), ['FIRST EFFECTIVE', 'SECOND EFFECTIVE', 'ANSWER']);
-    assert.equal(await chat.locator('[data-ctxkit-for="17:0"]').count(), 0);
+    assert.equal(await chat.locator('[data-ctxkit-for="17:0"]').count(), 1);
     assert.equal(await chat.locator('[data-ctxkit-for="17:1"]').count(), 1);
     const signed = chat.locator('[data-chat-flow-key="14:assistant-step17:1"] [data-variant="think"]');
     assert.equal(await signed.locator('[data-ctxkit-projection]').count(), 0);
@@ -1377,7 +1380,7 @@ try {
     await switchSession('A'); oldStatus.release(); await settle();
     assert.doesNotMatch(await panel.locator('footer').innerText(), /disabled|999/);
   });
-  await check('stale refusal retains draft; unedited and signed targets have no edited badge', async ({ page, panel, row, chat, state, open }) => {
+  await check('stale refusal retains draft; unedited targets have no edited badge', async ({ page, panel, row, chat, state, open }) => {
     assert.equal(await chat.locator('[data-ctxkit-projection]').count(), 0);
     await open(15);
     assert.doesNotMatch(await row(15).locator('.meta').innerText(), /edited/i);
@@ -1386,7 +1389,7 @@ try {
     await page.waitForFunction(() => document.querySelector('#dsh-context-kit-editor').shadowRoot.querySelector('footer').className === 'err');
     assert.equal(await row(15).locator('textarea').inputValue(), 'STALE DRAFT');
     assert.match(await panel.locator('footer').innerText(), /Not saved/);
-    assert.equal(await row(17).locator('option').count(), 0);
+    assert.equal(await row(17).locator('option').count(), 2);
   });
   await check('B5: delayed post-save reload cannot leave two rows open or erase the next draft', async ({ panel, row, open, hold, settle }) => {
     await open(15);

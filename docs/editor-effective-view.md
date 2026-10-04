@@ -10,7 +10,7 @@ historical investigation.
 | --- | --- |
 | B1: wire edits reopen the original | List and commit use the same effective projection. Text, character counts, block targets and edit badges update without waiting for another model request. New edits check the effective text they opened. |
 | B2: a reply opens Thinking by default | A list entry prefers its editable Answer target. A block-specific pencil still opens that exact block; thinking-only messages remain editable. |
-| B3: user pencil says Answer | User targets are labelled Message; assistant targets distinguish Answer and Thinking. Each shadow button has a matching accessible name and tooltip. |
+| B3: user pencil says Answer | User targets are labelled Message; assistant targets distinguish Answer, Thinking, Tool call, and Tool result. Each shadow button has a matching accessible name and tooltip. |
 | B4: durable edits never appear in Chat | Verified editor replacement ancestry maps the current surface message back to its original Chat row. A reversible Chat projection displays effective text without rewriting the audit. |
 | B5: several rows stay open | There is one active editor. Switching rows or targets protects unsaved drafts, including drafts held separately across sessions. |
 | B6: misleading branch/status text | Confirmation identifies the edited target. A wire branch alone does not produce an edited badge. |
@@ -21,8 +21,9 @@ historical investigation.
   records keep their original-basis behavior and their saved `before` values.
   Malformed persisted anchors are diagnosed and skipped individually.
 - `lib/edit-durable.js` keeps `editableIndex` raw and provides a separate
-  `effectiveEditableIndex`. Verified `originSeq` and `originId` follow only
-  editor-owned, single-source user replacements, not DCP or guessed ID suffixes.
+  `effectiveEditableIndex`. Verified `originSeq` and `originId` follow editor-owned,
+  single-source user replacements and core-valid content-only `tool/result` replacement
+  chains, not DCP or guessed ID suffixes.
 - `lib/edit-gui.js` returns the last 40 entries for the panel and the complete
   transcript projection for older visible Chat rows. A stale `expected` value is
   rejected before writing. Disabling the editor disables wire projection as well;

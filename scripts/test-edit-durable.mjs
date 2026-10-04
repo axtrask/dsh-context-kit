@@ -165,8 +165,15 @@ console.log('--- a durable edit of the user\'s own message ---');
   check('an out-of-range number is refused with the count', /no user message #9 \(2 available\)/.test(durable.resolveTarget(session, '9').reason ?? ''), durable.resolveTarget(session, '9').reason);
   check('an out-of-range negative is refused', durable.resolveTarget(session, '-9').reason !== undefined, durable.resolveTarget(session, '-9').reason ?? '');
   const firstId = String(durable.userMessages(session)[0].id);
+  const secondId = String(durable.userMessages(session)[1].id);
+  let uniquePrefixLength = 1;
+  while (uniquePrefixLength < firstId.length && (
+    secondId.startsWith(firstId.slice(0, uniquePrefixLength))
+      || /^[-+]?\d+$/u.test(firstId.slice(0, uniquePrefixLength))
+  )) uniquePrefixLength += 1;
+  const firstPrefix = firstId.slice(0, uniquePrefixLength);
   check('a full id resolves', durable.resolveTarget(session, firstId).entry?.text === 'FIRST QUESTION', '');
-  check('a unique id prefix resolves', durable.resolveTarget(session, firstId.slice(0, 6)).entry?.text === 'FIRST QUESTION', '');
+  check('a unique id prefix resolves', durable.resolveTarget(session, firstPrefix).entry?.text === 'FIRST QUESTION', firstPrefix);
   check('an unknown prefix is refused', durable.resolveTarget(session, 'zzzz').reason !== undefined, durable.resolveTarget(session, 'zzzz').reason ?? '');
 
   /* --- the dry run --- */
@@ -273,14 +280,53 @@ console.log('--- a durable edit of the user\'s own message ---');
   check('a running agent blocks a write', busy.kind === 'error' && /agent is running/.test(busy.text), busy.text);
   check('the blocked write changed nothing', !viewText(session).includes('changed while running'), '');
 
-  const freed = durable.runEditCommand({ session, agent: running, config: { enabled: true, requireIdle: false }, rawInput: '-1 changed with the gate off' });
-  check('the idle gate can be turned off deliberately', freed.kind === 'success', freed.text);
+  const bypass = durable.runEditCommand({ session, agent: running, config: { enabled: true, requireIdle: false }, rawInput: '-1 changed with the gate off' });
+  check('requireIdle false cannot bypass the mandatory running-agent guard', bypass.kind === 'error' && /agent is running/.test(bypass.text), bypass.text);
+  check('the attempted bypass changed nothing', !viewText(session).includes('changed with the gate off'), '');
+
+  let transactionState = 'untouched';
+  const failingAppendSession = new Proxy(session, {
+    get(target, property) {
+      if (property === 'append') return () => { throw new Error('simulated durable append failure'); };
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+  });
+  const transactionalStore = {
+    prepareTruncateAnchorRebase() {
+      transactionState = 'prepared';
+      return {
+        ok: true,
+        commit: () => { transactionState = 'committed'; },
+        rollback: () => { transactionState = 'rolled back'; }
+      };
+    }
+  };
+  let appendFailure;
+  try {
+    durable.runEditCommand({
+      session: failingAppendSession,
+      agent: idle,
+      store: transactionalStore,
+      config: on,
+      rawInput: '-1 should not survive a failed append'
+    });
+  } catch (error) {
+    appendFailure = error;
+  }
+  check('a durable append failure is reported', /simulated durable append failure/u.test(String(appendFailure)), String(appendFailure));
+  check('a prepared truncate-anchor rebase rolls back when the durable append fails', transactionState === 'rolled back', transactionState);
+  check('the failed durable append changes neither request nor tail', !viewText(session).includes('should not survive a failed append')
+    && viewText(session).includes('SECOND QUESTION'), viewText(session));
+
+  const written = durable.runEditCommand({ session, agent: idle, config: { enabled: true, requireIdle: false }, rawInput: '-1 changed while idle' });
+  check('the same legacy config still permits an idle write', written.kind === 'success', written.text);
   await new Promise((resolve) => setTimeout(resolve, 0));
-  check('the edit from the command reached the provider', viewText(session).includes('changed with the gate off'), '');
+  check('the idle edit from the command reached the provider', viewText(session).includes('changed while idle'), '');
   check('the tail survived the command edit', viewText(session).includes('FIRST QUESTION, TWICE'), '');
 
   const listed = durable.runEditCommand({ session, agent: idle, config: on, rawInput: '' });
-  check('the listing shows the text the command just wrote', listed.text.includes('changed with the gate off'), '');
+  check('the listing shows the text the command just wrote', listed.text.includes('changed while idle'), '');
 
   const pastedId = String(durable.userMessages(session)[0].id);
   const byId = durable.runEditCommand({ session, agent: idle, config: on, rawInput: `${pastedId} edited by id` });
@@ -308,6 +354,287 @@ console.log('--- a durable edit of the user\'s own message ---');
   check('the shipped core still refuses an assistant replacement', direct.accepted === false, JSON.stringify(direct).slice(0, 140));
 
   check('the state directory was not used by this test', !existsSync(join(scratchHome, 'context-kit', 'edits', 'edit-durable-walk.json')), '');
+}
+
+/* --------------------------------------- every genuine block editor target */
+
+console.log('--- durable editor block targets ---');
+{
+  const image = { type: 'image', source: { type: 'url', url: 'https://example.invalid/target.png' } };
+  const message = {
+    id: 'all-targets',
+    role: 'assistant',
+    content: [
+      text('ANSWER'),
+      { type: 'reasoning', text: 'THINKING' },
+      { type: 'tool-call', id: 'target-call', name: 'read', arguments: '{"path":"a.js"}' },
+      { type: 'tool-result', toolCallId: 'target-call', content: [text('NESTED RESULT'), image], isError: false },
+      image,
+      { type: 'tool-result', toolCallId: 'image-only', content: [image], isError: false },
+      { type: 'tool-result', toolCallId: 'malformed-content', content: 'not-blocks', isError: false }
+    ],
+    source: { kind: 'model', provider: 'p', model: 'm' }
+  };
+  const entry = {
+    seq: 1,
+    type: 'assistant/message',
+    role: 'assistant',
+    id: message.id,
+    index: 0,
+    text: 'ANSWER',
+    message
+  };
+  const targets = durable.blockTargets(entry);
+  check('text, reasoning, tool-call and nested tool-result blocks are exposed in order',
+    targets.map((target) => `${target.at}:${target.kind}`).join(',') === '0:text,1:reasoning,2:tool-call,3:tool-result',
+    JSON.stringify(targets));
+  check('every target has its specified human label',
+    targets.map((target) => target.label).join(',') === 'Answer,Thinking,Tool call,Tool result',
+    targets.map((target) => target.label).join(','));
+  check('target text uses the shared canonical text for every block kind',
+    targets.map((target) => target.text).join('|') === 'ANSWER|THINKING|{"path":"a.js"}|NESTED RESULT',
+    targets.map((target) => target.text).join('|'));
+  check('image, image-only result and malformed result blocks are not manufactured into targets',
+    targets.length === 4 && targets.every((target) => target.at < 4), JSON.stringify(targets));
+  check('assistant tool-call and nested tool-result targets stay on the wire branch',
+    durable.editability(entry, 2).branch === durable.WIRE_BRANCH
+      && durable.editability(entry, 3).branch === durable.WIRE_BRANCH
+      && targets[2].editable === true && targets[3].editable === true,
+    JSON.stringify([durable.editability(entry, 2), durable.editability(entry, 3)]));
+
+  const userMessage = llm.createUserMessage({ content: [text('QUESTION')], source: { kind: 'user' } });
+  const userEntry = { seq: 2, type: 'user/message', role: 'user', id: userMessage.id, index: 0, userIndex: 0, text: 'QUESTION', message: userMessage };
+  check('ordinary user and assistant text targets are labelled Message and Answer',
+    durable.blockTargets(userEntry)[0]?.label === 'Message' && targets[0]?.label === 'Answer');
+}
+
+/* ------------------------------------ durable host tool/result replacement */
+
+console.log('--- a durable edit of a host tool result ---');
+{
+  const session = Session.create(SessionId('editor-host-tool-result'));
+  const callId = llm.ToolCallId('host-call');
+  session.append('assistant/message', {
+    turn: 4,
+    step: 2,
+    stream: [{ keep: 'stream-envelope' }],
+    message: llm.createAssistantMessage({
+      content: [text('calling'), { type: 'tool-call', id: callId, name: 'read', arguments: '{"filePath":"a.js"}' }],
+      source: { kind: 'model', provider: 'p', model: 'm' }
+    })
+  }, { surfaceOp: 'append' });
+  const toolMessage = {
+    ...llm.createToolResultMessage({ callId, content: [
+      { ...text('HOST BODY'), annotations: { keep: 'text metadata' } },
+      { type: 'image', source: { type: 'url', url: 'https://example.invalid/result.png' } }
+    ], isError: true }),
+    metadata: { keep: 'message metadata' }
+  };
+  session.append(durable.TOOL_EVENT, {
+    turn: 4,
+    step: 2,
+    message: toolMessage,
+    error: { name: 'ReadError', code: 'E_READ', reason: 'original raw reason' },
+    meta: { card: { keep: true }, count: 7 }
+  }, { surfaceOp: 'append' });
+
+  const entry = durable.editableIndex(session).find((item) => item.type === durable.TOOL_EVENT);
+  const originalEvent = session.eventAt(entry.seq);
+  const originalLogLength = session.snapshotEvents().length;
+  const originalSurface = [...session.surface.nodes];
+  const originalAt = originalSurface.indexOf(entry.seq);
+  const withoutContent = (data) => JSON.stringify({ ...data, message: { ...data.message, content: null } });
+  const originalOutsideContent = withoutContent(originalEvent.data);
+  const targets = durable.blockTargets(entry);
+  check('a host result text block is exposed and labelled Tool result',
+    targets.length === 1 && targets[0].kind === 'text' && targets[0].label === 'Tool result' && targets[0].text === 'HOST BODY',
+    JSON.stringify(targets));
+  check('a host tool result selects the durable branch', durable.editability(entry, 0).branch === durable.DURABLE_BRANCH,
+    JSON.stringify(durable.editability(entry, 0)));
+
+  const dry = durable.commitToolResultEdit(session, entry, 'HOST BODY EDITED', { blockAt: 0, dryRun: true });
+  check('a host result dry run succeeds and reports the selected block', dry.ok === true
+    && dry.report?.before === 'HOST BODY' && dry.report?.after === 'HOST BODY EDITED'
+    && dry.report?.block === 0 && dry.report?.branch === durable.DURABLE_BRANCH, JSON.stringify(dry));
+  check('the host result dry run appends nothing', session.snapshotEvents().length === originalLogLength
+    && JSON.stringify(session.surface.nodes) === JSON.stringify(originalSurface));
+  check('the planned result changes only event.data.message.content', dry.ok === true
+    && withoutContent(dry.data) === originalOutsideContent
+    && dry.data.message.content[0].text === 'HOST BODY EDITED'
+    && JSON.stringify(dry.data.message.content[1]) === JSON.stringify(originalEvent.data.message.content[1]),
+    JSON.stringify(dry.data));
+  check('commitUserEdit cannot accidentally take the narrower tool-result branch',
+    durable.commitUserEdit(session, entry, 'WRONG API', { blockAt: 0, dryRun: true }).ok === false
+      && /commitToolResultEdit/u.test(durable.commitUserEdit(session, entry, 'WRONG API', { blockAt: 0, dryRun: true }).reason ?? ''));
+
+  const committed = durable.commitToolResultEdit(session, entry, 'HOST BODY EDITED', { blockAt: 0 });
+  check('the durable host result commit succeeds', committed.ok === true, JSON.stringify(committed.reason ?? committed.report));
+  check('the replacement appended exactly one event', session.snapshotEvents().length === originalLogLength + 1,
+    `${originalLogLength} -> ${session.snapshotEvents().length}`);
+  check('the result is replaced in its original surface slot', session.surface.nodes.length === originalSurface.length
+    && session.surface.nodes[originalAt] === committed.report?.newSeq
+    && session.surface.nodes.filter((_, at) => at !== originalAt).every((seq, at) => seq === originalSurface[at < originalAt ? at : at + 1]),
+    JSON.stringify(session.surface.nodes));
+  const currentEvent = session.eventAt(session.surface.nodes[originalAt]);
+  check('the committed result preserved every data and message field outside content',
+    withoutContent(currentEvent.data) === originalOutsideContent, withoutContent(currentEvent.data));
+  check('metadata, error identity and pairing survive the durable rewrite',
+    currentEvent.data.meta?.card?.keep === true
+      && currentEvent.data.error?.code === 'E_READ'
+      && currentEvent.data.message.metadata?.keep === 'message metadata'
+      && currentEvent.data.message.toolCallId === callId
+      && currentEvent.data.message.source?.callId === callId
+      && currentEvent.data.message.isError === true);
+  check('the selected text changed while the sibling image survived byte for byte',
+    currentEvent.data.message.content[0].text === 'HOST BODY EDITED'
+      && JSON.stringify(currentEvent.data.message.content[1]) === JSON.stringify(originalEvent.data.message.content[1]));
+  check('the append shadows exactly the original result node',
+    currentEvent.surfaceOp?.op === 'replace'
+      && currentEvent.surfaceOp.startSeq === entry.seq && currentEvent.surfaceOp.endSeq === entry.seq
+      && JSON.stringify(currentEvent.sourceEventSeqs) === JSON.stringify([entry.seq]), JSON.stringify(currentEvent));
+  check('the assistant call remains immediately before its paired edited result',
+    providerView(session)[0]?.content?.some((block) => block.type === 'tool-call' && block.id === callId)
+      && providerView(session)[1]?.toolCallId === callId);
+  check('the original result remains in the audit log',
+    session.snapshotEvents().some((event) => event.seq === entry.seq && event.data?.message?.content?.[0]?.text === 'HOST BODY'));
+
+  const firstProjection = durable.effectiveEditableIndex(session).find((item) => item.type === durable.TOOL_EVENT);
+  check('the GUI projection follows the durable result edge back to its original text',
+    firstProjection?.originSeq === entry.seq && firstProjection?.originId === entry.id
+      && firstProjection?.edited === true && firstProjection?.changed === true
+      && firstProjection?.targets?.[0]?.originalText === 'HOST BODY'
+      && firstProjection?.targets?.[0]?.edited === true && firstProjection?.targets?.[0]?.changed === true,
+    JSON.stringify(firstProjection));
+
+  const repeatedEntry = durable.editableIndex(session).find((item) => item.type === durable.TOOL_EVENT);
+  const repeated = durable.commitToolResultEdit(session, repeatedEntry, 'HOST BODY EDITED AGAIN', { blockAt: 0 });
+  const repeatedProjection = durable.effectiveEditableIndex(session).find((item) => item.type === durable.TOOL_EVENT);
+  check('a repeated durable result edit retains the first result as its restore origin', repeated.ok === true
+    && repeatedProjection?.originSeq === entry.seq && repeatedProjection?.targets?.[0]?.originalText === 'HOST BODY'
+    && repeatedProjection?.text === 'HOST BODY EDITED AGAIN', JSON.stringify(repeatedProjection));
+
+  const restoreEntry = durable.editableIndex(session).find((item) => item.type === durable.TOOL_EVENT);
+  const restored = durable.commitToolResultEdit(session, restoreEntry, repeatedProjection.targets[0].originalText, { blockAt: 0 });
+  const replay = Session.create(SessionId('editor-host-tool-result-replay'), session.snapshotEvents());
+  const restoredProjection = durable.effectiveEditableIndex(replay).find((item) => item.type === durable.TOOL_EVENT);
+  check('repeated edit and restore survive replay with history but no current difference', restored.ok === true
+    && restoredProjection?.originSeq === entry.seq && restoredProjection?.targets?.[0]?.originalText === 'HOST BODY'
+    && restoredProjection?.edited === true && restoredProjection?.changed === false
+    && restoredProjection?.targets?.[0]?.edited === true && restoredProjection?.targets?.[0]?.changed === false
+    && restoredProjection?.text === 'HOST BODY', JSON.stringify(restoredProjection));
+
+  const stale = durable.commitToolResultEdit(session, entry, 'STALE RESULT', { blockAt: 0, dryRun: true });
+  check('an entry for the shadowed result is refused as stale', stale.ok === false && /no longer a current surface node/u.test(stale.reason ?? ''), String(stale.reason));
+}
+
+console.log('--- canonical nested host tool-result editing ---');
+{
+  const session = Session.create(SessionId('editor-host-nested-tool-result'));
+  const callId = llm.ToolCallId('nested-host-call');
+  session.append('assistant/message', {
+    turn: 1, step: 1, stream: [],
+    message: llm.createAssistantMessage({
+      content: [{ type: 'tool-call', id: callId, name: 'nested', arguments: '{}' }],
+      source: { kind: 'model', provider: 'p', model: 'm' }
+    })
+  }, { surfaceOp: 'append' });
+  const image = { type: 'image', source: { type: 'url', url: 'https://example.invalid/nested.png' } };
+  session.append(durable.TOOL_EVENT, {
+    turn: 1, step: 1,
+    message: llm.createToolResultMessage({ callId, content: [{
+      type: 'tool-result', toolCallId: 'inner-call', isError: false,
+      content: [text('INNER A'), text(' + INNER B'), image]
+    }], isError: false })
+  }, { surfaceOp: 'append' });
+  const entry = durable.editableIndex(session).find((item) => item.type === durable.TOOL_EVENT);
+  const target = durable.blockTargets(entry)[0];
+  check('a nested result target uses canonical joined text', target?.kind === 'tool-result'
+    && target.text === 'INNER A + INNER B' && target.label === 'Tool result', JSON.stringify(target));
+  const result = durable.commitToolResultEdit(session, entry, 'INNER EDITED', { blockAt: target.at });
+  const nested = durable.editableIndex(session).find((item) => item.type === durable.TOOL_EVENT)?.message?.content?.[0];
+  check('the durable nested edit uses shared canonicalization and keeps result identity', result.ok === true
+    && nested?.type === 'tool-result' && nested.toolCallId === 'inner-call' && nested.isError === false
+    && nested.content.filter((block) => block.type === 'text').map((block) => block.text).join('') === 'INNER EDITED',
+    JSON.stringify(nested));
+  check('the nested non-text sibling survives canonicalization',
+    JSON.stringify(nested?.content?.find((block) => block.type === 'image')) === JSON.stringify(image));
+}
+
+console.log('--- malformed, unpaired and no-text host results are refused ---');
+{
+  const canonical = llm.createToolResultMessage({ callId: llm.ToolCallId('orphan-call'), content: [text('ORPHAN BODY')], isError: false });
+  const event = { seq: 10, type: durable.TOOL_EVENT, data: { turn: 1, step: 1, message: canonical } };
+  const stub = { surface: { nodes: [10] }, eventAt: (seq) => (seq === 10 ? event : undefined) };
+  const entry = durable.editableIndex(stub)[0];
+  const unpaired = durable.commitToolResultEdit(stub, entry, 'EDITED', { blockAt: 0, dryRun: true });
+  check('an otherwise canonical but unpaired host result is refused', unpaired.ok === false && /unpaired/u.test(unpaired.reason ?? ''), String(unpaired.reason));
+
+  const mismatchedMessage = { ...canonical, source: { ...canonical.source, callId: 'different-call' } };
+  const mismatchedEvent = { ...event, data: { ...event.data, message: mismatchedMessage } };
+  const mismatchedStub = { surface: { nodes: [10] }, eventAt: (seq) => (seq === 10 ? mismatchedEvent : undefined) };
+  const mismatchedEntry = durable.editableIndex(mismatchedStub)[0];
+  const mismatched = durable.commitToolResultEdit(mismatchedStub, mismatchedEntry, 'EDITED', { blockAt: 0, dryRun: true });
+  check('mismatched result and source pairing ids are refused as malformed',
+    mismatched.ok === false && /do not match/u.test(mismatched.reason ?? ''), String(mismatched.reason));
+
+  const callEvent = {
+    seq: 9, type: 'assistant/message',
+    data: { turn: 1, step: 1, stream: [], message: llm.createAssistantMessage({
+      content: [{ type: 'tool-call', id: llm.ToolCallId('no-text-call'), name: 'read', arguments: '{}' }],
+      source: { kind: 'model', provider: 'p', model: 'm' }
+    }) }
+  };
+  const noTextMessage = llm.createToolResultMessage({
+    callId: llm.ToolCallId('no-text-call'),
+    content: [
+      { type: 'image', source: { type: 'url', url: 'https://example.invalid/only.png' } },
+      { type: 'tool-result', toolCallId: 'inner', content: [], isError: false }
+    ],
+    isError: false
+  });
+  const noTextEvent = { seq: 10, type: durable.TOOL_EVENT, data: { turn: 1, step: 1, message: noTextMessage } };
+  const noTextStub = {
+    surface: { nodes: [9, 10] },
+    eventAt: (seq) => (seq === 9 ? callEvent : seq === 10 ? noTextEvent : undefined)
+  };
+  const noTextEntry = durable.editableIndex(noTextStub).find((item) => item.type === durable.TOOL_EVENT);
+  check('image-only and empty nested results expose no target', durable.blockTargets(noTextEntry).length === 0,
+    JSON.stringify(durable.blockTargets(noTextEntry)));
+  const noText = durable.commitToolResultEdit(noTextStub, noTextEntry, 'EDITED', { dryRun: true });
+  check('a paired host result with no genuine text is refused without append',
+    noText.ok === false && /no editable text block/u.test(noText.reason ?? ''), String(noText.reason));
+}
+
+console.log('--- only safe tool-result provenance is followed ---');
+for (const [name, alter] of [
+  ['multiple sources', ({ replacement, source }) => ({ source, replacement: { ...replacement, sourceEventSeqs: [0, 0] } })],
+  ['mismatched replacement range', ({ replacement, source }) => ({ source, replacement: { ...replacement, surfaceOp: { op: 'replace', startSeq: 0, endSeq: 1 } } })],
+  ['changed event metadata', ({ replacement, source }) => ({ source, replacement: { ...replacement, data: { ...replacement.data, meta: { forged: true } } } })],
+  ['changed message identity', ({ replacement, source }) => ({
+    source,
+    replacement: { ...replacement, data: { ...replacement.data, message: { ...replacement.data.message, id: 'different-result-id' } } }
+  })],
+  ['non-result source', ({ replacement, source }) => ({
+    replacement,
+    source: { ...source, type: 'user/message', data: llm.createUserMessage({ content: [text('SOURCE')], source: { kind: 'user' } }) }
+  })]
+]) {
+  const callId = llm.ToolCallId(`unsafe-provenance-${name}`);
+  const sourceMessage = llm.createToolResultMessage({ callId, content: [text('ORIGINAL')], isError: false });
+  const source = { seq: 0, type: durable.TOOL_EVENT, data: { turn: 1, step: 1, message: sourceMessage }, surfaceOp: 'append' };
+  const replacement = {
+    seq: 1,
+    type: durable.TOOL_EVENT,
+    data: { ...source.data, message: { ...sourceMessage, content: [text('CURRENT')] } },
+    sourceEventSeqs: [0],
+    surfaceOp: { op: 'replace', startSeq: 0, endSeq: 0 }
+  };
+  const changed = alter({ source, replacement });
+  const events = [changed.source, changed.replacement];
+  const session = { surface: { nodes: [1] }, eventAt: (seq) => events[seq] };
+  const projected = durable.effectiveEditableIndex(session)[0];
+  check(`tool-result origin does not cross ${name}`, projected?.originSeq === 1
+    && projected?.edited === false && projected?.targets?.[0]?.originalText === 'CURRENT', JSON.stringify(projected));
 }
 
 /* ------------------------------------------- the model's own thinking (CoT) */
@@ -369,8 +696,35 @@ console.log('--- the chain of thought ---');
   check('and it is editable on the wire', durable.editability(thinkingOnly).branch === 'wire', JSON.stringify(durable.editability(thinkingOnly)));
 
   const signed = replies[1];
-  check('a SIGNED thinking reply is refused', durable.editability(signed).ok === false, JSON.stringify(durable.editability(signed)));
-  check('the refusal names the signature as the reason', /signed|signature/u.test(String(durable.editability(signed).reason)), String(durable.editability(signed).reason));
+  check('a SIGNED thinking reply is editable on the wire', durable.editability(signed).branch === 'wire', JSON.stringify(durable.editability(signed)));
+  check('its signed reasoning target is offered for editing', durable.blockTargets(signed)[0]?.editable === true, JSON.stringify(durable.blockTargets(signed)));
+
+  const opaqueMessage = {
+    id: 'opaque-redacted-reasoning',
+    role: 'assistant',
+    content: [{ type: 'reasoning', redacted: { providerState: 'opaque' } }],
+    source: { kind: 'model', provider: 'p', model: 'm' }
+  };
+  const opaque = {
+    seq: 999,
+    type: 'assistant/message',
+    role: 'assistant',
+    id: opaqueMessage.id,
+    index: 0,
+    text: '',
+    message: opaqueMessage
+  };
+  const opaqueTargets = durable.blockTargets(opaque);
+  check('opaque redacted thinking remains a visible disabled target with empty display text',
+    opaqueTargets.length === 1 && opaqueTargets[0].kind === 'reasoning'
+      && opaqueTargets[0].label === 'Thinking' && opaqueTargets[0].text === '' && opaqueTargets[0].chars === 0
+      && opaqueTargets[0].signed === true && opaqueTargets[0].editable === false,
+    JSON.stringify(opaqueTargets));
+  check('opaque redacted thinking exposes the permanent redaction reason before generic no-text refusal',
+    /redacted, so its text is not what the provider receives/u.test(opaqueTargets[0]?.reason ?? '')
+      && !/no editable text/u.test(opaqueTargets[0]?.reason ?? '')
+      && durable.editability(opaque, 0).reason === opaqueTargets[0]?.reason,
+    JSON.stringify(durable.editability(opaque, 0)));
 
   const both = replies[2];
   check('a reply with thinking AND text is edited through its text', both?.text === 'SOME ANSWER', String(both?.text));

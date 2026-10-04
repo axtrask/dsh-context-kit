@@ -192,8 +192,8 @@ const mountedListeners = listenerCount(context, 'llm/stream');
 check('apply mounted a listener on llm/stream', mountedListeners >= 1,
   `listeners=${mountedListeners}${errors.length === 0 ? '' : `, errors=${errors.join(' | ')}`}`);
 check('the plugin published a wire store for the panel', bridge.publishedStores() === 1, String(bridge.publishedStores()));
-const wireStore = bridge.editStoreFor(sessionId);
-check('the store is reachable by session id, which is how the panel finds it', wireStore !== undefined, wireStore === undefined ? 'no store published' : 'store found');
+const wireStore = bridge.editStoreFor();
+check('the standalone mount exposes its store for a bound GUI install', wireStore !== undefined, wireStore === undefined ? 'no store published' : 'store found');
 
 const entries = durable.editableIndex(session);
 const reply = entries.find((entry) => entry.type === 'assistant/message');
@@ -442,7 +442,7 @@ const disposeGui = gui.installEditGui({
     register: (value) => { route = value; return () => {}; }, tapIndex: () => () => {}
   } : undefined,
   effect: (body) => body()
-}, dcp.engineForTest());
+}, dcp.engineForTest(), bridge.editStoreFor());
 const callThroughRoute = async (method, payload) => {
   const body = JSON.stringify({ type: 'client-request', rpcId: 'chain', method, payload });
   let answer;
@@ -491,7 +491,7 @@ check('GUI block 1 reports the selected durable B->Y', secondBlock?.ok && second
 shownUser = (await callThroughRoute(gui.EDIT_METHODS.list, { sessionId: multiId })).entries.find((entry) => entry.type === 'user/message');
 check('GUI list after both saves contains [X,Y]', shownUser.text === 'XY' && shownUser.targets.map((target) => target.text).join(',') === 'X,Y');
 check('durable GUI saves preserve original audit and never enter the wire store', JSON.stringify(multi.snapshotEvents().slice(0, multiEvents.length)) === multiLog
-  && bridge.editStoreFor(multiId).editsFor(multiId).length === 0);
+  && wireStore.editsFor(multiId).length === 0);
 const multiReplay = Session.create(multi.id, multi.snapshotEvents());
 const replayUser = durable.effectiveEditableIndex(multiReplay)[0];
 check('GUI block edits replay with the original origin chain', replayUser.originId === multiOriginal.id && replayUser.originSeq === multiOriginal.seq
@@ -520,6 +520,97 @@ for (const [id, userBlocks, block] of [
     && after.message.content.length === (Array.isArray(userBlocks) ? userBlocks.length : 1));
 }
 disposeGui();
+
+console.log('--- truncate-after keeps its user anchor and removes the complete effective suffix ---');
+const truncateId = 'edit-wire-truncate-after';
+const call1 = llm.ToolCallId('truncate-call-1');
+const call2 = llm.ToolCallId('truncate-call-2');
+const truncateMessages = [
+  llm.createUserMessage({ content: [text('KEEP Q1')], source: { kind: 'user' } }),
+  llm.createAssistantMessage({
+    content: [text('DROP A1'), { type: 'tool-call', id: call1, name: 'read', arguments: '{"filePath":"a.js"}' }],
+    source: { kind: 'model', provider: 'stub', model: 'stub' }
+  }),
+  llm.createToolResultMessage({ callId: call1, content: [text('DROP TOOL 1')], isError: false }),
+  llm.createUserMessage({ content: [text('DROP Q2')], source: { kind: 'user' } }),
+  llm.createAssistantMessage({
+    content: [text('DROP A2'), { type: 'tool-call', id: call2, name: 'read', arguments: '{"filePath":"b.js"}' }],
+    source: { kind: 'model', provider: 'stub', model: 'stub' }
+  }),
+  llm.createToolResultMessage({ callId: call2, content: [text('DROP TOOL 2')], isError: false })
+];
+const truncateOriginal = JSON.stringify(truncateMessages);
+const failedTruncateStore = edit.createEditStore({
+  restore: false,
+  save: () => { throw new Error('simulated truncate persistence failure'); }
+});
+let truncatePersistenceFailure;
+try {
+  failedTruncateStore.truncateAfter('failed-truncate', truncateMessages, {
+    messageIndex: 0, messageId: truncateMessages[0].id, expected: 'KEEP Q1'
+  });
+} catch (error) {
+  truncatePersistenceFailure = error;
+}
+check('a failed truncate save publishes no in-memory tombstone',
+  /simulated truncate persistence failure/u.test(String(truncatePersistenceFailure))
+    && failedTruncateStore.editsFor('failed-truncate').length === 0);
+
+const truncateStore = edit.createEditStore({ restore: false });
+const truncated = truncateStore.truncateAfter(truncateId, truncateMessages, {
+  messageIndex: 0,
+  messageId: truncateMessages[0].id,
+  expected: 'KEEP Q1'
+});
+check('truncate-after records one distinct suffix tombstone', truncated.ok === true
+  && truncated.edit?.kind === edit.TRUNCATE_AFTER_KIND && truncated.edit?.members?.length === 5, JSON.stringify(truncated));
+const truncatePlan = edit.planWireRewrite(truncateMessages, truncateStore.editsFor(truncateId));
+check('truncate-after preserves the selected user message exactly', truncatePlan.ok && truncatePlan.messages.length === 1
+  && truncatePlan.messages[0] === truncateMessages[0] && truncatePlan.messages[0].content[0].text === 'KEEP Q1');
+check('truncate-after removes every later user, assistant, and paired tool message', truncatePlan.applied[0]?.removed === 5
+  && !JSON.stringify(truncatePlan.messages).includes('DROP'));
+check('truncate-after never mutates its source message array', JSON.stringify(truncateMessages) === truncateOriginal);
+const truncateReload = edit.createEditStore().editsFor(truncateId);
+check('truncate-after persists and reloads through the same wire planner', truncateReload[0]?.kind === edit.TRUNCATE_AFTER_KIND
+  && edit.planWireRewrite(truncateMessages, truncateReload).messages.length === 1);
+
+let rejectRebase = false;
+const transactionalRebaseStore = edit.createEditStore({
+  restore: false,
+  save: () => {
+    if (rejectRebase) throw new Error('simulated rebase persistence failure');
+  }
+});
+transactionalRebaseStore.truncateAfter('rebase-transaction', truncateMessages, {
+  messageIndex: 0, messageId: truncateMessages[0].id, expected: 'KEEP Q1'
+});
+const beforeFailedRebase = JSON.stringify(transactionalRebaseStore.editsFor('rebase-transaction'));
+const replacementAnchor = {
+  ...truncateMessages[0], id: `${truncateMessages[0].id}-edited`, content: [text('KEEP Q1, EDITED')]
+};
+rejectRebase = true;
+let rebasePersistenceFailure;
+try {
+  transactionalRebaseStore.rebaseTruncateAnchors(
+    'rebase-transaction', truncateMessages[0].id, replacementAnchor
+  );
+} catch (error) {
+  rebasePersistenceFailure = error;
+}
+check('a failed rebase save leaves the published tombstone unchanged',
+  /simulated rebase persistence failure/u.test(String(rebasePersistenceFailure))
+    && JSON.stringify(transactionalRebaseStore.editsFor('rebase-transaction')) === beforeFailedRebase);
+
+const staleAnchorMessages = structuredClone(truncateMessages);
+staleAnchorMessages[0].content[0].text = 'CHANGED Q1';
+const staleAnchorPlan = edit.planWireRewrite(staleAnchorMessages, truncateReload);
+check('truncate-after refuses a stale retained anchor without changing history', !staleAnchorPlan.ok && !staleAnchorPlan.changed
+  && staleAnchorPlan.messages === staleAnchorMessages && staleAnchorPlan.refused[0]?.reason.includes('anchor'));
+const staleMemberMessages = structuredClone(truncateMessages);
+staleMemberMessages[2].id = 'changed-tool-result-id';
+const staleMemberPlan = edit.planWireRewrite(staleMemberMessages, truncateReload);
+check('truncate-after refuses a stale suffix member without a partial splice', !staleMemberPlan.ok && !staleMemberPlan.changed
+  && staleMemberPlan.messages === staleMemberMessages && staleMemberPlan.refused[0]?.reason.includes('member'));
 
 console.log('--- the listener belongs to the plugin: dispose it and the rewrite stops ---');
 
@@ -573,7 +664,8 @@ const offRoot = await mountPlugin({ editor: { enabled: false } });
 const offSession = await fixture(offRoot.store, 'edit-wire-off');
 const offId = String(offSession.id);
 const offReply = durable.editableIndex(offSession).find((entry) => entry.type === 'assistant/message');
-bridge.editStoreFor(offId).record(offId, offReply.message, 'REPLY-EDITED-WHILE-OFF', {
+const offWireStore = bridge.editStoreFor();
+offWireStore.record(offId, offReply.message, 'REPLY-EDITED-WHILE-OFF', {
   messageIndex: offReply.index,
   messageId: offReply.id,
   expected: offReply.text
