@@ -983,7 +983,12 @@ ok('nested editable regions paint one deepest hover outline and share their mark
   assert.match(hover, /^\[data-ctxkit-edit\]:hover:not\(:has\(\[data-ctxkit-edit\]:hover\)\)/u,
     'an outer marked wrapper can still paint behind its hovered child');
   assert.equal((hover.match(/outline:/gu) || []).length, 1, 'the hover winner paints more than one outline');
-  assert.doesNotMatch(hover, /box-shadow/u, 'the removed hover glow came back');
+  assert.match(hover, /outline: 1px solid var\(--dsw-alias-border-l2\)/u,
+    'the hover outline is still brighter than a normal strong border');
+  assert.match(hover, /box-shadow: 0 0 12px color-mix\(in srgb, var\(--dsw-alias-border-l2\) 35%, transparent\)/u,
+    'the dim hover glow is missing');
+  assert.doesNotMatch(hover, /studio-accent|brand-primary|#[0-9a-f]/iu,
+    'the hover outline still uses a bright accent');
   assert.doesNotMatch(styles[0].textContent, /\[data-ctxkit-edit\]:hover\s*\{/u,
     'a generic parent hover painter bypasses the deepest-only rule');
 
