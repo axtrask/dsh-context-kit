@@ -2,19 +2,20 @@
 
 The editor's release contract is guarded by `npm run test:edit-history`, which covers
 core behavior, durable state, wire behavior, GUI behavior, and GUI load order. Its DOM contract
-keeps the action strip visible, keeps refused controls disabled with their explanation, verifies
-the retain-anchor confirmation text, and removes stale destructive strips when rows are recycled.
+keeps destructive controls icon-only and hidden until row hover or keyboard focus, omits unusable
+controls, verifies the retain-anchor confirmation text, and removes stale strips when rows are recycled.
 `npm run test:publication` also checks the command argument gate and imports the packed plugin
 entry points. The optional Playwright browser check remains environment-dependent.
 
 ## Current release contract
 
-- The panel exposes every text-bearing block that can be changed safely. Edit and delete
-  actions remain visible instead of appearing only on hover, and destructive operations use
-  explicit labels such as **Delete turn**, **Hide all history after this message**, and **Delete reply**.
-- Signed, non-redacted reasoning is editable. The edited block becomes ordinary `text` in
-  both the visible and replay payloads, and provider signatures and stale replay metadata are
-  removed. Opaque or redacted reasoning remains listed but disabled with an explanation because
+- The panel exposes every text-bearing block that can be changed safely. Transcript delete actions
+  are compact icons that appear only while their row is hovered or keyboard-focused. A row absent
+  from the editor index receives no unusable destructive controls.
+- Signed, non-redacted reasoning is editable without adding a warning label to the transcript.
+  The edited block becomes ordinary `text` in both the visible and replay payloads, and provider
+  signatures and stale replay metadata are removed. Opaque or redacted reasoning remains listed
+  but disabled with an explanation because
   text the user cannot see cannot be rewritten honestly.
 - Every direct human message offers **Hide all history after this message**. After confirmation it
   retains that message and suppresses only the later history. Other deletion scopes preserve

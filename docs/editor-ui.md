@@ -2,18 +2,16 @@
 
 ## Current behavior
 
-- Each transcript row exposes a permanently visible action strip. Available actions have
-  readable labels; refused actions stay visible but disabled and explain why they are unsafe.
+- Eligible transcript rows expose compact icon-only destructive actions on row hover or keyboard
+  focus. Rows absent from the editor index expose no unusable destructive controls.
 - Eligible user, assistant, tool-call, tool-result, and reasoning text blocks can be edited or
   deleted without implicitly removing the following history. Assistant tool blocks use the wire
   overlay; host `tool/result` events use a durable content-only replacement that preserves the
-  envelope, message metadata, and call pairing. Signed visible reasoning is converted to ordinary
-  provider-neutral text and loses every stale signature, including replay-state signatures.
-  Opaque or redacted reasoning remains permanently visible as unavailable and cannot be selected.
-- Every direct human message has **Hide all history after this message**. Its confirmation states
-  that the selected user message is retained and only later history is hidden. The other
-  destructive labels are **Delete turn** and **Delete reply**, so their scopes are not represented
-  by icons alone.
+  envelope, message metadata, and call pairing. Editing signed visible reasoning converts it to
+  ordinary provider-neutral text and removes stale signatures, without adding a status label to
+  the transcript. Opaque or redacted reasoning remains unavailable and cannot be selected.
+- Every direct human message has an icon action that hides all later history. Its confirmation
+  states that the selected user message is retained and only later history is hidden.
 - Mutations are disabled while generation is active and are also rejected by the server if a
   stale or modified client submits one. `editor.requireIdle: false` is accepted only as legacy
   configuration; it never disables this guard.

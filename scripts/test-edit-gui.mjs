@@ -1169,8 +1169,8 @@ ok('nested editable regions paint one deepest hover outline and share their mark
   head.querySelector = (selector) => head.children.find((child) => child.tagName === 'STYLE'
     && selector === 'style[data-ctxkit-affordance]' && child.hasAttribute('data-ctxkit-affordance')) || null;
   globalThis.__ctxkitAffordanceDocument = { head, createElement: (tag) => fakeElement(tag) };
-  const { EDIT_ATTR, AFFORDANCE_ATTR, DELETE_STRIP_ATTR, installAffordance, markRegion, unmarkRegion, pinAt } = panelConsts(injectEditor(PAGE), [
-    'PENCIL_ATTR', 'DELETE_STRIP_ATTR', 'HIDDEN_TURN_ATTR', 'EDIT_ATTR', 'AFFORDANCE_ATTR', 'installAffordance',
+  const { EDIT_ATTR, AFFORDANCE_ATTR, DELETE_REGION_ATTR, DELETE_STRIP_ATTR, installAffordance, markRegion, unmarkRegion, pinAt } = panelConsts(injectEditor(PAGE), [
+    'PENCIL_ATTR', 'DELETE_REGION_ATTR', 'DELETE_STRIP_ATTR', 'HIDDEN_TURN_ATTR', 'EDIT_ATTR', 'AFFORDANCE_ATTR', 'installAffordance',
     'regionOwners', 'markRegion', 'unmarkRegion', 'pinAt'
   ], 'const document = globalThis.__ctxkitAffordanceDocument;');
   installAffordance();
@@ -1192,9 +1192,11 @@ ok('nested editable regions paint one deepest hover outline and share their mark
     'a generic parent hover painter bypasses the deepest-only rule');
   assert.match(
     styles[0].textContent,
-    new RegExp('\\[' + DELETE_STRIP_ATTR + '\\]\\s*\\{[^}]*opacity:\\s*1\\s*!important', 'u'),
-    'delete controls inside the native action strip can still be hidden outside hover'
+    new RegExp('\\[' + DELETE_STRIP_ATTR + '\\]\\s*\\{[^}]*opacity:\\s*0\\s*!important', 'u'),
+    'delete controls inside the native action strip are visible outside hover'
   );
+  assert.match(styles[0].textContent, new RegExp('\\[' + DELETE_REGION_ATTR + '\\]:hover \\[' + DELETE_STRIP_ATTR + '\\]', 'u'),
+    'hovering a deletable row does not reveal its native action strip');
 
   const shared = fakeElement('div');
   markRegion(shared);
@@ -1249,8 +1251,8 @@ ok('a direct human row keeps distinct delete-turn and truncate-after actions wit
   assert.deepEqual(actions.map((action) => action.getAttribute('data-ctxkit-delete')).sort(), ['after:17', 'turn:17']);
   assert.deepEqual(actions, first, 'stable direct-user actions were unnecessarily replaced');
   const buttons = actions.map((action) => action.shadowRoot.children.find((child) => child.tagName === 'BUTTON'));
-  assert.deepEqual(buttons.map((button) => button.children.find((child) => child.tagName === 'SPAN')?.textContent).sort(),
-    ['Delete turn', 'Hide all history after this message'], 'the two destructive choices are not visibly named');
+  assert.ok(buttons.every((button) => button.children.length === 1 && button.children[0].tagName === 'SVG'),
+    'destructive choices must be icon-only');
   assert.equal(new Set(buttons.map((button) => button.children.find((child) => child.tagName === 'SVG')
     ?.children[0]?.getAttribute('d'))).size, 2, 'delete-turn and truncate-after still use the same glyph');
   for (const button of buttons) button.dispatch('click');
@@ -1260,7 +1262,7 @@ ok('a direct human row keeps distinct delete-turn and truncate-after actions wit
   delete globalThis.__ctxkitDeleteDocument;
 });
 
-ok('an unmatched visible user row keeps disabled destructive controls and clears stale strip state', () => {
+ok('an unmatched visible user row does not expose unusable destructive controls', () => {
   globalThis.__ctxkitUnavailableActionDocument = {
     createElement: (tag) => fakeElement(tag),
     createElementNS: (_namespace, tag) => fakeElement(tag)
@@ -1283,15 +1285,10 @@ ok('an unmatched visible user row keeps disabled destructive controls and clears
   row.setAttribute('data-chat-flow-kind', 'user');
   STATE.listed = true;
   placeDeleteAction(row, undefined);
-  const actions = row.querySelectorAll('[data-ctxkit-delete]');
-  assert.equal(actions.length, 2, 'the unmatched direct-user row lost its two destructive controls');
-  const buttons = actions.map((action) => action.shadowRoot.children.find((child) => child.tagName === 'BUTTON'));
-  assert.ok(buttons.every((button) => button.disabled === true), 'an unmatched-row destructive action stayed enabled');
-  assert.deepEqual(buttons.map((button) => button.children[1].textContent).sort(),
-    ['Delete turn', 'Hide all history after this message']);
-  assert.ok(buttons.every((button) => /^Unavailable: This row is not among/u.test(button.title)),
-    'the disabled controls do not explain why they are unavailable');
-  assert.equal(row.hasAttribute('data-ctxkit-delete-strip'), true);
+  assert.equal(row.querySelectorAll('[data-ctxkit-delete]').length, 0,
+    'the unmatched row exposed destructive controls that cannot work');
+  assert.equal(row.hasAttribute('data-ctxkit-delete-strip'), false);
+  assert.equal(row.hasAttribute('data-ctxkit-delete-region'), false);
 
   STATE.listed = false;
   placeDeleteAction(row, undefined);
@@ -1329,25 +1326,23 @@ ok('an assistant row keeps one exact delete-message action and wires its callbac
   assert.equal(first.getAttribute('data-ctxkit-delete'), 'message:18');
   assert.ok(row.hasAttribute('data-ctxkit-delete-region'), 'the deletable row is not marked as the hover region');
   const style = first.shadowRoot.children.find((child) => child.tagName === 'STYLE');
-  assert.match(style.textContent, /:host\{display:inline-flex;[^}]*opacity:1;pointer-events:auto/u,
-    'the delete action is not permanently visible and clickable');
-  assert.doesNotMatch(style.textContent, /width:0|height:0|opacity:0|pointer-events:none/u,
-    'the delete action still collapses or hides at rest');
+  assert.match(style.textContent, /:host\{display:inline-flex;[^}]*opacity:0;pointer-events:none/u,
+    'the delete action is visible before its message row is hovered');
+  assert.match(style.textContent, /:host-context\(\[data-ctxkit-delete-region\]:hover\)[^{]*\{opacity:1;pointer-events:auto/u,
+    'hovering the message row does not reveal the delete action');
   assert.match(style.textContent,
-    /button\{[^}]*min-width:36px;height:36px;[^}]*border:1px solid color-mix\(in srgb,var\(--dsw-alias-state-error-primary\) 55%,transparent\);[^}]*background:color-mix\(in srgb,var\(--dsw-alias-state-error-primary\) 16%,transparent\)/u,
-    'the permanent delete button is still too easy to miss');
+    /button\{[^}]*width:32px;height:32px;[^}]*border:0;[^}]*background:transparent/u,
+    'the delete action is not a compact icon-only control');
   assert.match(style.textContent, /svg\{[^}]*width:17px;height:17px;[^}]*stroke-width:2/u,
     'the trash glyph is still too small or faint');
   assert.match(style.textContent, /@media\(pointer:coarse\)\{button\{min-height:44px/u,
     'touch input has no 44px delete target');
   const button = first.shadowRoot.children.find((child) => child.tagName === 'BUTTON');
-  assert.equal(button.children.length, 2, 'the destructive action must render an icon and readable label');
+  assert.equal(button.children.length, 1, 'the destructive action must render only its icon');
   assert.equal(button.children[0].tagName, 'SVG', 'the destructive action does not render an icon');
   assert.equal(button.children[0].children[0]?.tagName, 'PATH', 'the trash icon has no path');
   assert.equal(button.children[0].children[0]?.getAttribute('d'), 'M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5m4-5v5',
     'the assistant action is not visibly distinguished as deletion');
-  assert.equal(button.children[1].tagName, 'SPAN');
-  assert.equal(button.children[1].textContent, 'Delete reply', 'the assistant action has no readable label');
   assert.equal(button.getAttribute('aria-label'), 'Delete this assistant message');
   button.dispatch('click');
   assert.equal(globalThis.__ctxkitDeleteAction.calls.length, 1, 'the assistant action did not request message deletion');
@@ -2325,10 +2320,10 @@ ok('a signed thinking and the answer beside it are both editable', () => {
   assert.deepEqual(shown.targets.map((target) => target.reason), [undefined, undefined]);
 });
 
-ok('signed thinking warns about provider-neutral conversion while redacted thinking stays visible and refused', () => {
+ok('signed thinking stays visually quiet while redacted thinking stays visible and refused', () => {
   const { badgeText, pinTargets } = panelConsts(injectEditor(PAGE), ['badgeText', 'targetsOf', 'fallbackTarget', 'pinTargets']);
   const signed = panelEntry(replyEntry([blockReasoning('SIGNED THINKING')], { source: signedSource })).targets[0];
-  assert.equal(badgeText(signed), 'Editing signed thinking converts it to ordinary text');
+  assert.equal(badgeText(signed), '', 'signed thinking leaked a conversion warning into the transcript');
 
   const shown = panelEntry(replyEntry([{ ...blockReasoning('OPAQUE THINKING'), redacted: true }]));
   assert.equal(shown.targets.length, 1, 'redacted thinking disappeared from the target list');
