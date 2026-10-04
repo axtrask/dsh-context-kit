@@ -1075,6 +1075,11 @@ ok('an assistant row keeps one exact delete-message action and wires its callbac
     'keyboard focus cannot reveal the delete action');
   assert.match(style.textContent, /@media\(hover:none\)\{:host\{width:auto;height:auto;opacity:1;pointer-events:auto/u,
     'touch input has no reachable delete action');
+  assert.match(style.textContent,
+    /button\{[^}]*width:32px;height:32px;[^}]*border:1px solid color-mix\(in srgb,var\(--dsw-alias-state-error-primary\) 38%,transparent\);[^}]*background:color-mix\(in srgb,var\(--dsw-alias-state-error-primary\) 12%,transparent\)/u,
+    'the revealed delete button is still too easy to miss');
+  assert.match(style.textContent, /svg\{[^}]*width:18px;height:18px;[^}]*stroke-width:2\.1/u,
+    'the trash glyph is still too small or faint');
   const button = first.shadowRoot.children.find((child) => child.tagName === 'BUTTON');
   assert.equal(button.textContent, '', 'the destructive action still renders a text label');
   assert.equal(button.children.length, 1, 'the destructive action has more than one visible mark');
