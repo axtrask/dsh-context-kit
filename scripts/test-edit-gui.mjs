@@ -919,7 +919,7 @@ ok('the decorator hides only the exact assistant row for a delete-message tombst
     'const document = globalThis.__ctxkitHiddenDocument;',
     'const flowRows = () => [...document.querySelectorAll(FLOW_SELECTOR)];',
     'const running = () => false; const installAffordance = () => {};',
-    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const PENCIL_ATTR = "data-ctxkit-pencil";',
+    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const PENCIL_ATTR = "data-ctxkit-pencil";',
     'const projectRow = () => {}; const placeDeleteAction = () => {};'
   ].join('\n'));
   STATE.sessionId = 'test-session';
@@ -1009,12 +1009,16 @@ ok('nested editable regions paint one deepest hover outline and share their mark
 });
 
 ok('re-decoration keeps exactly one delete action on a direct human row', () => {
-  globalThis.__ctxkitDeleteDocument = { createElement: (tag) => fakeElement(tag) };
+  globalThis.__ctxkitDeleteDocument = {
+    createElement: (tag) => fakeElement(tag),
+    createElementNS: (_namespace, tag) => fakeElement(tag)
+  };
   const { placeDeleteAction } = panelConsts(injectEditor(PAGE), [
     'canDeleteTurn', 'canDeleteMessage', 'placeDeleteAction'
   ], [
     'const document = globalThis.__ctxkitDeleteDocument;',
     'const DELETE_ACTION_ATTR = "data-ctxkit-delete";',
+    'const DELETE_REGION_ATTR = "data-ctxkit-delete-region";',
     'const requestTurnDeletion = () => {};',
     'const requestMessageDeletion = () => {};',
     'const userActionStrip = (node) => node;',
@@ -1032,12 +1036,16 @@ ok('re-decoration keeps exactly one delete action on a direct human row', () => 
 
 ok('an assistant row keeps one exact delete-message action and wires its callback', () => {
   globalThis.__ctxkitDeleteAction = { calls: [] };
-  globalThis.__ctxkitDeleteDocument = { createElement: (tag) => fakeElement(tag) };
+  globalThis.__ctxkitDeleteDocument = {
+    createElement: (tag) => fakeElement(tag),
+    createElementNS: (_namespace, tag) => fakeElement(tag)
+  };
   const { placeDeleteAction } = panelConsts(injectEditor(PAGE), [
     'canDeleteTurn', 'canDeleteMessage', 'placeDeleteAction'
   ], [
     'const document = globalThis.__ctxkitDeleteDocument;',
     'const DELETE_ACTION_ATTR = "data-ctxkit-delete";',
+    'const DELETE_REGION_ATTR = "data-ctxkit-delete-region";',
     'const requestTurnDeletion = () => { throw Error("assistant action called deleteTurn"); };',
     'const requestMessageDeletion = (entry, control) => globalThis.__ctxkitDeleteAction.calls.push([entry, control]);',
     'const userActionStrip = () => null;',
@@ -1051,8 +1059,22 @@ ok('an assistant row keeps one exact delete-message action and wires its callbac
   assert.equal(row.querySelectorAll('[data-ctxkit-delete]').length, 1, 'a second decoration duplicated Delete message');
   assert.equal(row.querySelector('[data-ctxkit-delete]'), first, 'a stable assistant delete action was replaced');
   assert.equal(first.getAttribute('data-ctxkit-delete'), 'message:18');
+  assert.ok(row.hasAttribute('data-ctxkit-delete-region'), 'the deletable row is not marked as the hover region');
+  const style = first.shadowRoot.children.find((child) => child.tagName === 'STYLE');
+  assert.match(style.textContent, /:host\{display:inline-flex;[^}]*width:0;height:0;opacity:0;pointer-events:none/u,
+    'the delete action occupies space or is visible before row hover');
+  assert.match(style.textContent,
+    /:host-context\(\[data-ctxkit-delete-region\]:hover\)\{width:auto;height:auto;opacity:1;pointer-events:auto/u,
+    'hovering the message row does not reveal the delete action');
+  assert.match(style.textContent, /:host\(:focus-within\)\{width:auto;height:auto;opacity:1;pointer-events:auto/u,
+    'keyboard focus cannot reveal the delete action');
+  assert.match(style.textContent, /@media\(hover:none\)\{:host\{width:auto;height:auto;opacity:1;pointer-events:auto/u,
+    'touch input has no reachable delete action');
   const button = first.shadowRoot.children.find((child) => child.tagName === 'BUTTON');
-  assert.equal(button.textContent, 'Delete message');
+  assert.equal(button.textContent, '', 'the destructive action still renders a text label');
+  assert.equal(button.children.length, 1, 'the destructive action has more than one visible mark');
+  assert.equal(button.children[0].tagName, 'SVG', 'the destructive action does not render an icon');
+  assert.equal(button.children[0].children[0]?.tagName, 'PATH', 'the trash icon has no path');
   assert.equal(button.getAttribute('aria-label'), 'Delete this assistant message');
   button.dispatch('click');
   assert.equal(globalThis.__ctxkitDeleteAction.calls.length, 1, 'the assistant action did not request message deletion');
@@ -1927,7 +1949,7 @@ ok('a row draws one pencil per editable target, keyed by seq and block', () => {
   ], [
     'const document = globalThis.__ctxkitDocument;',
     'const installAffordance = () => {}; const setDeletedVisibility = () => {};',
-    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const placeDeleteAction = () => {};',
+    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const placeDeleteAction = () => {};',
     'const generationRunning = () => globalThis.__ctxkitGeneration.running; const STOP_GENERATION = "Generation is running. Stop generation before editing or deleting history."; const say = (message, kind) => globalThis.__ctxkitGeneration.notices.push([message, kind]);',
     'const getComputedStyle = () => ({ position: "static" });',
     'const projectRow = () => {};', // Display projection is driven by the full browser regression.
@@ -2041,7 +2063,7 @@ ok('a pencil is not drawn for a target that cannot be rewritten', () => {
   ], [
     'const document = globalThis.__ctxkitDocument;',
     'const installAffordance = () => {}; const setDeletedVisibility = () => {};',
-    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const placeDeleteAction = () => {};',
+    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const placeDeleteAction = () => {};',
     'const generationRunning = () => globalThis.__ctxkitGeneration.running; const STOP_GENERATION = "Generation is running. Stop generation before editing or deleting history."; const say = (message, kind) => globalThis.__ctxkitGeneration.notices.push([message, kind]);',
     'const getComputedStyle = () => ({ position: "static" });',
     'const projectRow = () => {};',
