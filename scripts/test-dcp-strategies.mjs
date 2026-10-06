@@ -1007,7 +1007,13 @@ console.log('\n--- the passes run by themselves, on every session event ---');
   // The store is built on the SAME context the plugin is mounted on, which is the
   // only arrangement in which `session/event` reaches the plugin at all.
   const store = new SessionStore(context);
-  const { engine } = await mountEngine({}, { context, sessions: store, store });
+  const { engine, meter } = await mountEngine({}, { context, sessions: store, store });
+  let estimateCalls = 0;
+  const estimateMessage = meter.estimateMessage;
+  meter.estimateMessage = (message) => {
+    estimateCalls += 1;
+    return estimateMessage(message);
+  };
   const session = store.create(undefined, { meta: { cwd: process.cwd() } });
   for (let attempt = 0; attempt < 50 && store.get(session.id) === undefined; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1045,6 +1051,88 @@ console.log('\n--- the passes run by themselves, on every session event ---');
   check('the surviving copy is untouched', view.includes('NEW-READ-BODY'), '');
   check('the placeholder is what the model reads instead', view.includes(PRUNED_TOOL_OUTPUT_REPLACEMENT), '');
   check('the pruned call was materialized on the surface', state.prunedNodeFor('c1') !== undefined, JSON.stringify(state.prunedNodeFor('c1') ?? null));
+  check('a synchronous result burst schedules one automatic pass', engine.guardCounts.automaticScheduled === 1 && engine.guardCounts.automaticCoalesced === 1 && engine.guardCounts.automaticExecuted === 1, JSON.stringify(engine.guardCounts));
+  check('default planners share one measured tool snapshot', engine.guardCounts.planningSnapshots === 1 && estimateCalls === 2, `${engine.guardCounts.planningSnapshots} snapshot(s), ${estimateCalls} estimate(s)`);
+
+  const skippedBefore = engine.guardCounts.automaticSkippedClean;
+  engine.runAutomaticPrune(session, undefined, 'pre-step');
+  check('an unchanged pre-step does not rescan history', engine.guardCounts.automaticSkippedClean === skippedBefore + 1 && estimateCalls === 2, JSON.stringify(engine.guardCounts));
+
+  const flushedBefore = engine.guardCounts.automaticFlushed;
+  const executedBeforeFlush = engine.guardCounts.automaticExecuted;
+  engine.scheduleAutomaticPrune(session, session.seq);
+  engine.runAutomaticPrune(session, undefined, 'pre-step');
+  await Promise.resolve();
+  check('pre-step flushes pending work before its queued callback', engine.guardCounts.automaticFlushed === flushedBefore + 1 && engine.guardCounts.automaticExecuted === executedBeforeFlush + 1, JSON.stringify(engine.guardCounts));
+
+  const canceledBefore = engine.guardCounts.automaticCanceled;
+  const executedBeforeDispose = engine.guardCounts.automaticExecuted;
+  engine.scheduleAutomaticPrune(session, session.seq);
+  engine.disposeSession(session);
+  await Promise.resolve();
+  check('disposed sessions cancel queued automatic work', engine.guardCounts.automaticCanceled === canceledBefore + 1 && engine.guardCounts.automaticExecuted === executedBeforeDispose, JSON.stringify(engine.guardCounts));
+  check('disposed sessions release in-memory state only', !engine._blocksBySession.has(String(session.id)) && !engine._automaticPrunes.has(String(session.id)) && !engine._wireEstimates.has(String(session.id)), String(session.id));
+
+  const reusedId = `reused-${process.pid}`;
+  const oldObject = { id: reusedId, seq: 0, surface: { nodes: [] }, eventAt: () => undefined, snapshotEvents: () => [] };
+  const replacementObject = { ...oldObject, surface: { nodes: [] } };
+  engine.scheduleAutomaticPrune(oldObject, 0);
+  engine.blocksFor(oldObject);
+  const canceledBeforeReuse = engine.guardCounts.automaticCanceled;
+  const replacementState = engine.blocksFor(replacementObject);
+  const replacementJournal = { owner: replacementObject };
+  const replacementEstimate = { inputTokens: 12 };
+  const replacementNudge = { text: 'replacement' };
+  const replacementGeneration = replacementState.mutationVersion;
+  engine._compressionJournals.set(reusedId, replacementJournal);
+  engine._compressionLandingLocks.add(reusedId);
+  engine._wireEstimates.set(reusedId, replacementEstimate);
+  engine._nudgePrompt ??= new Map();
+  engine._nudgePrompt.set(reusedId, replacementNudge);
+  engine._persistedBlockVersions.set(reusedId, replacementGeneration);
+  engine._lastSession = replacementObject;
+  engine.disposeSession(oldObject);
+  check('a blocksFor owner change cancels the old object’s queued work', engine.guardCounts.automaticCanceled === canceledBeforeReuse + 1 && !engine._automaticPrunes.has(reusedId), JSON.stringify(engine.guardCounts));
+  check(
+    'late disposal cannot erase replacement state after only a blocksFor touch',
+    engine._sessionOwners.get(reusedId) === replacementObject
+      && engine._blocksBySession.get(reusedId) === replacementState
+      && engine._compressionJournals.get(reusedId) === replacementJournal
+      && engine._compressionLandingLocks.has(reusedId)
+      && engine._wireEstimates.get(reusedId) === replacementEstimate
+      && engine._nudgePrompt.get(reusedId) === replacementNudge
+      && engine._persistedBlockVersions.get(reusedId) === replacementGeneration
+      && engine._blocksSessionId === reusedId
+      && engine._lastSession === replacementObject,
+    reusedId
+  );
+  engine.disposeSession(replacementObject);
+  await Promise.resolve();
+
+  const scheduleOnlyId = `schedule-only-reused-${process.pid}`;
+  const scheduleOnlyOld = { id: scheduleOnlyId, seq: 0, surface: { nodes: [] }, eventAt: () => undefined, snapshotEvents: () => [] };
+  const scheduleOnlyReplacement = { ...scheduleOnlyOld, surface: { nodes: [] } };
+  engine.blocksFor(scheduleOnlyOld);
+  const canceledBeforeScheduleOnlyDispose = engine.guardCounts.automaticCanceled;
+  const executedBeforeScheduleOnlyDispose = engine.guardCounts.automaticExecuted;
+  engine.scheduleAutomaticPrune(scheduleOnlyReplacement, 0);
+  check(
+    'a schedule-only replacement claims ownership before its queued pass',
+    engine._sessionOwners.get(scheduleOnlyId) === scheduleOnlyReplacement
+      && engine._automaticPrunes.get(scheduleOnlyId)?.session === scheduleOnlyReplacement,
+    scheduleOnlyId
+  );
+  engine.disposeSession(scheduleOnlyReplacement);
+  await Promise.resolve();
+  check(
+    'disposing a schedule-only replacement cancels its queued pass and releases reused-id state',
+    engine.guardCounts.automaticCanceled === canceledBeforeScheduleOnlyDispose + 1
+      && engine.guardCounts.automaticExecuted === executedBeforeScheduleOnlyDispose
+      && !engine._sessionOwners.has(scheduleOnlyId)
+      && !engine._automaticPrunes.has(scheduleOnlyId)
+      && !engine._blocksBySession.has(scheduleOnlyId),
+    JSON.stringify(engine.guardCounts)
+  );
 
   // Idempotence: a further event must not re-prune or re-materialize anything.
   const nodesAfterFirst = session.surface.nodes.length;
@@ -1052,6 +1140,34 @@ console.log('\n--- the passes run by themselves, on every session event ---');
   await new Promise((resolve) => setTimeout(resolve, 0));
   check('a later event does not prune again', state.prunedToolCount === 1, String(state.prunedToolCount));
   check('a later event does not grow the surface with a second placeholder', session.surface.nodes.length === nodesAfterFirst, `${nodesAfterFirst} -> ${session.surface.nodes.length}`);
+}
+
+console.log('\n--- unchanged state skips serialization and disk comparison ---');
+{
+  const { engine } = await mountEngine({});
+  const session = fakeSession([]);
+  const state = engine.blocksFor(session);
+  const before = { ...engine.guardCounts };
+  engine.saveBlocks(session);
+  engine.saveBlocks(session);
+  state.manualPermit = true;
+  state.markDirty();
+  engine.saveBlocks(session);
+  check('three save requests serialize only first and dirty generations', engine.guardCounts.saveCalls - before.saveCalls === 3 && engine.guardCounts.saveSerializations - before.saveSerializations === 2 && engine.guardCounts.saveSkippedClean - before.saveSkippedClean === 1, JSON.stringify(engine.guardCounts));
+  check('dirty wire-visible state is durable before save returns', engine.guardCounts.saveWrites - before.saveWrites === 2, JSON.stringify(engine.guardCounts));
+
+  state.stats.compressions = 1n;
+  state.markDirty();
+  let strictFailed = false;
+  try {
+    engine.saveBlocksStrict(session, state);
+  } catch {
+    strictFailed = true;
+  }
+  const retryStayedDirty = engine._persistedBlockVersions.get(String(session.id)) !== state.mutationVersion;
+  state.stats.compressions = 0;
+  engine.saveBlocksStrict(session, state);
+  check('a failed strict save keeps the dirty generation retryable', strictFailed && retryStayedDirty && engine._persistedBlockVersions.get(String(session.id)) === state.mutationVersion, JSON.stringify(engine.guardCounts));
 }
 
 console.log('\n--- the harness compacting the session resets stale DCP addresses ---');

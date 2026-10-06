@@ -243,6 +243,55 @@ check(
 );
 check('the overlay reported no error', !warnings.some((line) => /wire overlay failed/.test(line)), JSON.stringify(warnings.slice(0, 3)));
 
+/* ----------------------------------------- complete live-turn deletion on wire */
+
+const deleteWireSession = 'edit-wire-delete-complete-turn';
+const deleteUser = llm.createUserMessage({ content: [text('WIRE DELETE QUESTION')], source: { kind: 'user' } });
+const deleteAnswer = llm.createAssistantMessage({
+  content: [text('WIRE DELETE INITIAL ANSWER')],
+  source: { kind: 'model', provider: 'stub', model: 'stub' }
+});
+const keepUser = llm.createUserMessage({ content: [text('WIRE KEEP QUESTION')], source: { kind: 'user' } });
+const deleteRecorded = wireStore.deleteTurn(deleteWireSession, [deleteUser, deleteAnswer, keepUser], {
+  messageIndex: 0,
+  messageId: deleteUser.id,
+  expected: 'WIRE DELETE QUESTION'
+});
+check('the production wire store records a complete-turn tombstone', deleteRecorded.ok === true,
+  JSON.stringify(deleteRecorded.reason ?? deleteRecorded.edit?.id ?? ''));
+const wireCallId = llm.ToolCallId('wire-delete-live-call');
+const expandedWireTurn = [
+  deleteUser,
+  deleteAnswer,
+  llm.createUserMessage({ content: [text('WIRE DELETE GOAL')], source: { kind: 'goal' } }),
+  llm.createAssistantMessage({
+    content: [text('WIRE DELETE TOOL STEP'), { type: 'tool-call', id: wireCallId, name: 'read', arguments: '{"path":"wire"}' }],
+    source: { kind: 'model', provider: 'stub', model: 'stub' }
+  }),
+  llm.createToolResultMessage({ callId: wireCallId, content: [text('WIRE DELETE TOOL RESULT')], isError: false }),
+  llm.createAssistantMessage({
+    content: [text('WIRE DELETE FINAL ANSWER')],
+    source: { kind: 'model', provider: 'stub', model: 'stub' }
+  }),
+  keepUser
+];
+const beforeDeleteWire = calls.length;
+await drain(runtime, llm.markAgentLoopRequest(Object.freeze({
+  provider: 'stub',
+  model: 'stub',
+  messages: expandedWireTurn,
+  sessionId: deleteWireSession,
+  signal: undefined
+})));
+await tick();
+const deleteWireCalls = calls.slice(beforeDeleteWire);
+check('the real llm/stream listener removes provider-only steering, tool and assistant envelopes with the turn',
+  deleteWireCalls.length > 0 && deleteWireCalls.every((call) => !call.includes('WIRE DELETE')),
+  `calls retaining deleted content=${deleteWireCalls.filter((call) => call.includes('WIRE DELETE')).length}`);
+check('the real llm/stream listener preserves the next direct human boundary',
+  deleteWireCalls.length > 0 && deleteWireCalls.every((call) => call.includes('WIRE KEEP QUESTION')),
+  `adapter calls=${deleteWireCalls.length}`);
+
 /* ------------------------------------------------------- what did NOT change */
 
 console.log('--- the session log is untouched ---');
@@ -438,7 +487,9 @@ const chainId = String(chainSession.id);
 const chainReply = durable.editableIndex(chainSession).find((entry) => entry.type === 'assistant/message');
 let route;
 const disposeGui = gui.installEditGui({
-  get: (key) => key === 'sessions' ? store : key === 'connection' ? { rpc: { handle() {} } } : key === 'webServer' ? {
+  get: (key) => key === 'sessions'
+    ? { get: (id) => store.get(id), flush: async () => true }
+    : key === 'connection' ? { requestRejection: () => undefined, rpc: { handle() {} } } : key === 'webServer' ? {
     register: (value) => { route = value; return () => {}; }, tapIndex: () => () => {}
   } : undefined,
   effect: (body) => body()

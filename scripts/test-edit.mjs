@@ -901,6 +901,35 @@ check('turn deletion reports stable provenance for every removed message',
     && firstPlan.applied[0]?.removedOrigins?.join(',') === '1,2,3,4'
     && firstPlan.origins.join(',') === '0,5,6,7', JSON.stringify(firstPlan));
 
+const providerExpandedFirstTurn = [
+  ...turnMessages.slice(0, 5),
+  { id: 'wire-goal', role: 'user', content: [text('Continue')], source: { kind: 'goal' } },
+  assistantMessage('wire-extra', text('Provider-only intermediate answer')),
+  ...turnMessages.slice(5)
+];
+const providerExpandedPlan = edit.planWireRewrite(providerExpandedFirstTurn, deleteStore.editsFor('delete-first'));
+check('wire-only steering and assistant envelopes stay inside the deleted live turn',
+  providerExpandedPlan.applied.length === 1 && providerExpandedPlan.refused.length === 0
+    && providerExpandedPlan.messages.map((message) => message.id).join(',') === 'sys,u2,a2,u3',
+  JSON.stringify(providerExpandedPlan.refused));
+const removedTurnBoundary = [...turnMessages.slice(0, 5), ...turnMessages.slice(6)];
+const removedBoundaryPlan = edit.planWireRewrite(removedTurnBoundary, deleteStore.editsFor('delete-first'));
+check('turn deletion atomically refuses a removed next-user boundary',
+  removedBoundaryPlan.applied.length === 0 && removedBoundaryPlan.refused.length === 1
+    && removedBoundaryPlan.messages.map((message) => message.id).join(',') === 'sys,u1,a1-call,r1,a1-final,a2,u3',
+  JSON.stringify(removedBoundaryPlan));
+const replacedTurnBoundary = [
+  ...turnMessages.slice(0, 5),
+  userMessage('u2-replaced', text('Second question')),
+  ...turnMessages.slice(6)
+];
+const replacedBoundaryPlan = edit.planWireRewrite(replacedTurnBoundary, deleteStore.editsFor('delete-first'));
+check('turn deletion atomically refuses a replaced next-user boundary',
+  replacedBoundaryPlan.applied.length === 0 && replacedBoundaryPlan.refused.length === 1
+    && replacedBoundaryPlan.messages.map((message) => message.id).join(',')
+      === 'sys,u1,a1-call,r1,a1-final,u2-replaced,a2,u3',
+  JSON.stringify(replacedBoundaryPlan));
+
 // The live Host projects a tool result as a role=tool message whose pairing id is
 // top-level. The older nested tool-result shape above remains valid, but it cannot be
 // the only shape closure validation understands.
@@ -947,6 +976,20 @@ const withFuturePrompt = [...finalHistory, userMessage('u4', text('Future questi
 const futurePlan = edit.planWireRewrite(withFuturePrompt, finalStore.editsFor('delete-final-stable'));
 check('a final-turn tombstone never expands onto a future user prompt',
   futurePlan.messages.map((message) => message.id).join(',') === 'sys,u1,a1-call,r1,a1-final,u2,a2,u4');
+
+const expandedFinalTurn = [
+  ...finalHistory,
+  { id: 'late-goal', role: 'user', content: [text('Keep going')], source: { kind: 'goal' } },
+  assistantMessage('late-call', text('Checking'), call('late-tool', 'read', '{}')),
+  hostResultMessage('late-result', 'late-tool', 'late tool output'),
+  assistantMessage('late-final', text('Late final answer')),
+  userMessage('u4-expanded', text('Future direct question'))
+];
+const expandedFinalPlan = edit.planWireRewrite(expandedFinalTurn, finalStore.editsFor('delete-final-stable'));
+check('a deleted final turn absorbs a later complete tool continuation but preserves the next human request',
+  expandedFinalPlan.applied.length === 1 && expandedFinalPlan.refused.length === 0
+    && expandedFinalPlan.messages.map((message) => message.id).join(',') === 'sys,u1,a1-call,r1,a1-final,u2,a2,u4-expanded',
+  JSON.stringify(expandedFinalPlan.refused));
 
 const syntheticUser = {
   id: 'goal-continue', role: 'user', content: [text('Continue toward the goal')], source: { kind: 'goal' }
@@ -1000,11 +1043,19 @@ check('edited anchor and next-boundary provenance survives save, reload, and rep
   JSON.stringify({ problems: durableBoundaryProblems, edits: restoredBoundaryEdits, plan: restoredBoundaryPlan }));
 
 const changedMembers = [...finalHistory];
-changedMembers.splice(8, 0, assistantMessage('inserted', text('Unexpected insertion')));
+changedMembers.splice(8, 0, assistantMessage('inserted', text('Provider-only continuation')));
 const changedMemberPlan = edit.planWireRewrite(changedMembers, finalStore.editsFor('delete-final-stable'));
-check('an inserted member makes the whole deletion refuse atomically',
-  changedMemberPlan.applied.length === 0 && changedMemberPlan.refused.length === 1
-    && changedMemberPlan.messages.length === changedMembers.length);
+check('a provider-only continuation is absorbed into the deleted live turn',
+  changedMemberPlan.applied.length === 1 && changedMemberPlan.refused.length === 0
+    && changedMemberPlan.messages.map((message) => message.id).join(',') === 'sys,u1,a1-call,r1,a1-final,u2,a2');
+
+const changedRecordedMember = finalHistory.map((message) => message.id === 'a3'
+  ? { ...message, id: 'a3-replaced', content: [text('Changed third answer')] }
+  : message);
+const changedRecordedMemberPlan = edit.planWireRewrite(changedRecordedMember, finalStore.editsFor('delete-final-stable'));
+check('a changed recorded member still refuses the whole deletion atomically',
+  changedRecordedMemberPlan.applied.length === 0 && changedRecordedMemberPlan.refused.length === 1
+    && changedRecordedMemberPlan.messages.length === changedRecordedMember.length);
 
 const incompleteToolTurn = [
   userMessage('tool-user', text('Run it')),
@@ -1015,6 +1066,14 @@ const incompleteDelete = edit.createEditStore({ restore: false }).deleteTurn('de
 });
 check('a deletion with an unpaired tool call is refused before persistence',
   incompleteDelete.ok === false && /missing or ambiguous/u.test(String(incompleteDelete.reason)));
+
+const idlessDelete = edit.createEditStore({ restore: false }).deleteTurn('delete-idless-member', [
+  userMessage('idless-user', text('Delete safely')),
+  { role: 'assistant', content: [text('No stable identity')] },
+  userMessage('idless-next', text('Keep me'))
+], { messageIndex: 0, messageId: 'idless-user', expected: 'Delete safely' });
+check('an id-less recorded turn member is refused explicitly before persistence',
+  idlessDelete.ok === false && /no stable id/u.test(String(idlessDelete.reason)));
 
 const staleDelete = edit.createEditStore({ restore: false }).deleteTurn('delete-stale', turnMessages, {
   messageIndex: 1, messageId: 'u1', expected: 'Old question text'
@@ -1290,6 +1349,15 @@ check('preparing a real rebase writes a separate journal', realTruncate.ok === t
 check('preparing keeps the real main edit document and memory on the old state',
   readFileSync(realMainPath, 'utf8') === realBaseDocument
     && realStore.editsFor(realTransactionSession)[0]?.messageId === realHistory[0].id);
+const liveRecovery = realStore.recoverPrepared(
+  realTransactionSession,
+  eventSession(realTransactionSession, [realReplacement])
+);
+check('the preparing store cannot treat its unconfirmed live replacement as durable',
+  liveRecovery.ok === false && /awaiting session durability confirmation/u.test(liveRecovery.reason)
+    && realStore.editsFor(realTransactionSession)[0]?.messageId === realHistory[0].id
+    && readFileSync(realMainPath, 'utf8') === realBaseDocument
+    && existsSync(realJournalPath), JSON.stringify(liveRecovery));
 
 const restartedRealStore = edit.createEditStore();
 check('restart hydration exposes the old side until recovery',
@@ -1391,6 +1459,8 @@ const observerPrepared = memoryStore.prepareTruncateAnchorRebase(
   observerHistory[0].id,
   observerReplacement
 );
+check('safe eviction refuses to discard pending recovery data', observerPrepared.ok === true
+  && memoryStore.evict(observerSession) === false && memoryStore.sessionCount() > 0);
 const observerRefusals = [
   memoryStore.record(observerSession, observerHistory[0], 'mutated', { messageIndex: 0 }),
   memoryStore.deleteTurn(observerSession, observerHistory, { messageIndex: 0 }),
@@ -1520,6 +1590,41 @@ check('rollback cleanup failure is reported without masking an append failure', 
   && cleanupStore.editsFor('prepared-cleanup')[0]?.messageId === cleanupHistory[0].id
   && cleanupStore.recordApplied('prepared-cleanup', []).ok === false);
 
+let checkedPreparedLoads = 0;
+const checkedStore = edit.createEditStore({
+  load: () => ({ edits: [], problems: [] }),
+  save() {},
+  savePrepared() {},
+  loadPrepared() {
+    checkedPreparedLoads += 1;
+    return { transaction: undefined, problems: [], present: false };
+  },
+  clearPrepared() { return true; }
+});
+const checkedSessionId = 'prepared-checked-absence';
+const checkedHistory = transactionHistory('checked');
+const firstCheckedRecovery = checkedStore.recoverPrepared(checkedSessionId, eventSession(checkedSessionId, []));
+const secondCheckedRecovery = checkedStore.recoverPrepared(checkedSessionId, eventSession(checkedSessionId, []));
+check('a checked absent journal is not forced back to disk on every recovery request', firstCheckedRecovery.recovered === false
+  && secondCheckedRecovery.recovered === false && checkedPreparedLoads === 1, String(checkedPreparedLoads));
+checkedStore.truncateAfter(checkedSessionId, checkedHistory, {
+  messageIndex: 0,
+  messageId: checkedHistory[0].id,
+  expected: 'Retained question'
+});
+const checkedReplacement = replacementFor('checked-replacement', 'Checked replacement');
+const checkedPrepared = checkedStore.prepareTruncateAnchorRebase(checkedSessionId, checkedHistory[0].id, checkedReplacement);
+const checkedRecovery = checkedStore.recoverPrepared(
+  checkedSessionId,
+  eventSession(checkedSessionId, [checkedReplacement])
+);
+check('a journal created in-process stays locked after absence was checked', checkedPrepared.ok === true
+  && checkedRecovery.ok === false && /awaiting session durability confirmation/u.test(checkedRecovery.reason)
+  && checkedPreparedLoads === 1);
+check('safe eviction removes settled session state', checkedStore.sessionCount() === 1
+  && checkedPrepared.rollback().ok === true
+  && checkedStore.evict(checkedSessionId) === true && checkedStore.sessionCount() === 0);
+
 const wireMain = new Map();
 const wireJournals = new Map();
 const wireStore = edit.createEditStore({
@@ -1545,14 +1650,53 @@ wireStore.truncateAfter(wireSessionId, wireHistory, {
 const wireReplacement = replacementFor('wire-replacement', 'Wire replacement');
 wireStore.prepareTruncateAnchorRebase(wireSessionId, wireHistory[0].id, wireReplacement);
 let wireListener;
+let disposedListener;
 const fakeWireRoot = {
   on(event, listener) {
     if (event === 'llm/stream') wireListener = listener;
-    return () => { wireListener = undefined; };
+    if (event === 'session/disposed') disposedListener = listener;
+    return () => {
+      if (event === 'llm/stream') wireListener = undefined;
+      if (event === 'session/disposed') disposedListener = undefined;
+    };
   }
 };
 const disposeWire = edit.installWireOverlay(fakeWireRoot, wireStore);
+disposedListener({ id: wireSessionId });
+check('session disposal cannot evict a pending prepared journal', wireStore.sessionCount() === 1
+  && wireJournals.has(wireSessionId));
 let rewrittenWireRequest;
+const liveWireResult = wireListener.call({
+  stream(request) {
+    rewrittenWireRequest = request;
+    return 'wire-rewritten';
+  }
+}, {
+  sessionId: wireSessionId,
+  session: eventSession(wireSessionId, [wireReplacement]),
+  messages: [wireReplacement, wireHistory[1], wireHistory[2]]
+}, () => 'wire-unchanged');
+check('wire overlay cannot recover from its own unconfirmed live replacement',
+  liveWireResult === 'wire-unchanged' && rewrittenWireRequest === undefined
+    && wireStore.editsFor(wireSessionId)[0]?.messageId === wireHistory[0].id
+    && wireJournals.has(wireSessionId));
+disposeWire();
+const restartedWireStore = edit.createEditStore({
+  load(sessionId) {
+    return { edits: [...(wireMain.get(sessionId)?.edits ?? [])], problems: [] };
+  },
+  save(sessionId, state) { wireMain.set(sessionId, { edits: [...state.edits] }); },
+  savePrepared(sessionId, transaction) { wireJournals.set(sessionId, transaction); },
+  loadPrepared(sessionId) {
+    return { transaction: wireJournals.get(sessionId), problems: [], present: wireJournals.has(sessionId) };
+  },
+  clearPrepared(sessionId, transactionId) {
+    if (wireJournals.get(sessionId)?.id !== transactionId) return false;
+    wireJournals.delete(sessionId);
+    return true;
+  }
+});
+const disposeRestartedWire = edit.installWireOverlay(fakeWireRoot, restartedWireStore);
 const wireResult = wireListener.call({
   stream(request) {
     rewrittenWireRequest = request;
@@ -1563,12 +1707,15 @@ const wireResult = wireListener.call({
   session: eventSession(wireSessionId, [wireReplacement]),
   messages: [wireReplacement, wireHistory[1], wireHistory[2]]
 }, () => 'wire-unchanged');
-disposeWire();
-check('wire overlay recovers a prepared journal before reading edits', wireResult === 'wire-rewritten'
+check('wire overlay recovers a prepared journal after store restart', wireResult === 'wire-rewritten'
   && rewrittenWireRequest?.messages.length === 1
   && rewrittenWireRequest.messages[0]?.id === wireReplacement.id
-  && wireStore.editsFor(wireSessionId)[0]?.messageId === wireReplacement.id
+  && restartedWireStore.editsFor(wireSessionId)[0]?.messageId === wireReplacement.id
   && !wireJournals.has(wireSessionId));
+disposedListener({ id: wireSessionId });
+check('session disposal evicts settled editor state', restartedWireStore.sessionCount() === 0);
+disposeRestartedWire();
+check('wire disposal removes both public event listeners', wireListener === undefined && disposedListener === undefined);
 
 console.log(`\n${failures.length === 0 ? 'all edit behaviour tests passed' : `${failures.length} FAILURES: ${failures.join('; ')}`}`);
 process.exit(failures.length === 0 ? 0 : 1);

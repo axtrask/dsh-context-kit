@@ -20,7 +20,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -32,9 +32,10 @@ import * as llm from '@deepseek-ai/dsh-llm';
 import { Session, SessionId, SessionStore } from '@deepseek-ai/dsh-session';
 
 import { EDIT_CHANNEL, EDIT_METHODS, SESSION_KEY, injectEditor, installEditGui, panelEntry } from '../lib/edit-gui.js';
+import { createChannelHandler } from '../lib/edit-route.js';
 import { createPanelScript } from '../lib/edit-panel.js';
 import { blockTargets, commitUserEdit, editableIndex, effectiveEditableIndex, editability, renderEditableList } from '../lib/edit-durable.js';
-import { createEdit, createEditStore, editStatePath, planWireRewrite } from '../lib/edit.js';
+import { createEdit, createEditStore, editStatePath, editTransactionPath, planWireRewrite } from '../lib/edit.js';
 import { publishEditStore, publishEngine, resetBridgeForTest } from '../lib/edit-bridge.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -655,13 +656,46 @@ ok('a composition with no Web surface gets no button, and still yields a dispose
   assert.deepEqual(injected.map((entry) => entry.names), [['connection', 'webServer']]);
 });
 
+ok('the direct route applies Host rejection before body parsing or dispatch', async () => {
+  for (const [status, body] of [[401, 'unauthorized'], [403, 'forbidden']]) {
+    const events = [];
+    const handler = createChannelHandler(EDIT_CHANNEL, () => {
+      events.push('dispatch');
+      throw new Error('a rejected request was dispatched');
+    }, {
+      requestRejection(request) {
+        assert.equal(request.method, 'POST');
+        events.push('auth');
+        return status;
+      }
+    });
+    let answeredStatus;
+    let answeredBody;
+    await handler({
+      url: `${EDIT_CHANNEL}/${EDIT_METHODS.status}`,
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      on() {
+        events.push('body');
+        throw new Error('a rejected request body was read');
+      }
+    }, {
+      writeHead(code) { answeredStatus = code; return this; },
+      end(text) { answeredBody = text; }
+    });
+    assert.deepEqual(events, ['auth'], `${status} rejection happened after body parsing or dispatch`);
+    assert.equal(answeredStatus, status);
+    assert.equal(answeredBody, body);
+  }
+});
+
 ok('a Web surface registers exactly one channel and one tap, and releases both', async () => {
   const released = [];
   const routes = [];
   const tapped = [];
   const ctx = {
     get: (key) => (key === 'connection'
-      ? { rpc: { handle: () => { throw new Error('the connection seam must not be used for the channel'); } } }
+      ? { requestRejection: () => undefined, rpc: { handle: () => { throw new Error('the connection seam must not be used for the channel'); } } }
       : key === 'webServer'
         ? {
           tapIndex: (transform) => { tapped.push(transform); return () => released.push('tap'); },
@@ -716,7 +750,7 @@ ok('an explicit route session never falls back to the newest bridged engine', as
   });
   const ctx = {
     get: (key) => key === 'connection'
-      ? { rpc: { handle() {} } }
+      ? { requestRejection: () => undefined, rpc: { handle() {} } }
       : key === 'webServer'
         ? { register: (route) => { routes.push(route); return () => {}; }, tapIndex: () => () => {} }
         : undefined,
@@ -755,12 +789,14 @@ ok('a Web surface that comes up LATER is still mounted (the load-order bug)', ()
   const tapped = [];
   const injected = [];
   const late = {
-    get: (key) => (key === 'webServer'
-      ? {
-        tapIndex: (transform) => { tapped.push(transform); return () => released.push('tap'); },
-        register: (route) => { routes.push(route); return () => released.push('route'); }
-      }
-      : undefined),
+    get: (key) => (key === 'connection'
+      ? { requestRejection: () => undefined }
+      : key === 'webServer'
+        ? {
+          tapIndex: (transform) => { tapped.push(transform); return () => released.push('tap'); },
+          register: (route) => { routes.push(route); return () => released.push('route'); }
+        }
+        : undefined),
     // The injected callback registers the mount on the OUTER context, whose
     // `effect` is what an injected context does not have. Without it here the
     // mount throws into the callback's own guard and this test would pass on a
@@ -1120,7 +1156,7 @@ ok('the decorator hides only the exact assistant row for a delete-message tombst
     'const flowRows = () => [...document.querySelectorAll(FLOW_SELECTOR)];',
     'const running = () => false; const installAffordance = () => {};',
     'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const DELETE_STRIP_ATTR = "data-ctxkit-delete-strip"; const PENCIL_ATTR = "data-ctxkit-pencil";',
-    'const projectRow = () => {}; const placeDeleteAction = () => {};'
+    'const projectRow = () => {}; const placeDeleteAction = () => {}; const deletionActions = () => []; const deleteOwnership = (rows, hiddenFor) => ({ rowState: new Map(rows.map((node) => [node, { hidden: hiddenFor(node), entry: entryFor(STATE.transcript, targetOf(node)) }])), deleteOwner: new Map() });'
   ].join('\n'));
   STATE.sessionId = 'test-session';
   STATE.hidden = [{ type: 'assistant/message', turn: 8, step: 2, id: 'reply-8', deletedMessage: true, deletedTurn: false }];
@@ -1170,8 +1206,8 @@ ok('editable regions leave pointer hover native while keeping keyboard focus vis
   head.querySelector = (selector) => head.children.find((child) => child.tagName === 'STYLE'
     && selector === 'style[data-ctxkit-affordance]' && child.hasAttribute('data-ctxkit-affordance')) || null;
   globalThis.__ctxkitAffordanceDocument = { head, createElement: (tag) => fakeElement(tag) };
-  const { EDIT_ATTR, AFFORDANCE_ATTR, DELETE_REGION_ATTR, DELETE_STRIP_ATTR, installAffordance, markRegion, unmarkRegion, pinAt } = panelConsts(injectEditor(PAGE), [
-    'FLOW_SELECTOR', 'PENCIL_ATTR', 'DELETE_REGION_ATTR', 'DELETE_STRIP_ATTR', 'HIDDEN_TURN_ATTR', 'EDIT_ATTR', 'AFFORDANCE_ATTR', 'installAffordance',
+  const { EDIT_ATTR, AFFORDANCE_ATTR, DELETE_ACTION_ATTR, DELETE_REGION_ATTR, DELETE_STRIP_ATTR, DELETE_HOVER_ATTR, installAffordance, markRegion, unmarkRegion, pinAt } = panelConsts(injectEditor(PAGE), [
+    'FLOW_SELECTOR', 'PENCIL_ATTR', 'DELETE_ACTION_ATTR', 'DELETE_REGION_ATTR', 'DELETE_STRIP_ATTR', 'DELETE_HOVER_ATTR', 'HIDDEN_TURN_ATTR', 'EDIT_ATTR', 'AFFORDANCE_ATTR', 'installAffordance',
     'regionOwners', 'markRegion', 'unmarkRegion', 'pinAt'
   ], 'const document = globalThis.__ctxkitAffordanceDocument;');
   installAffordance();
@@ -1186,16 +1222,20 @@ ok('editable regions leave pointer hover native while keeping keyboard focus vis
   assert.match(affordance,
     /\[data-chat-flow\] > \[data-chat-flow-key\]:has\(\[data-ctxkit-pencil\]:focus-within\) \[data-ctxkit-edit\] \{ outline: 2px solid/u,
     'keyboard focus no longer identifies the editable region from a native action strip');
+  assert.doesNotMatch(affordance, new RegExp('\\[' + DELETE_STRIP_ATTR + '\\]\\s*\\{', 'u'),
+    'Context Kit still changes the shell-owned native action strip');
   assert.match(
-    styles[0].textContent,
-    new RegExp('\\[' + DELETE_STRIP_ATTR + '\\]\\s*\\{[^}]*opacity:\\s*0\\s*!important', 'u'),
-    'delete controls inside the native action strip are visible outside hover'
+    affordance,
+    new RegExp('\\[' + DELETE_ACTION_ATTR + '\\]\\s*\\{[^}]*opacity:\\s*0\\s*!important;[^}]*pointer-events:\\s*none', 'u'),
+    'only the destructive host must be hidden outside hover or focus'
   );
-  assert.match(affordance, new RegExp('\\[' + DELETE_REGION_ATTR + '\\]:hover \\[' + DELETE_STRIP_ATTR + '\\]', 'u'),
-    'hovering a deletable row does not reveal its native action strip');
-  assert.match(affordance, new RegExp('\\[' + DELETE_REGION_ATTR + '\\]:hover \\+ \\[data-chat-flow-kind="turn-tail"\\] \\[' + DELETE_STRIP_ATTR + '\\]', 'u'),
-    'hovering an assistant row does not reveal the following native action strip');
-  assert.match(affordance, new RegExp('\\[data-chat-flow-kind="turn-tail"\\]:hover \\[' + DELETE_STRIP_ATTR + '\\]', 'u'),
+  assert.match(affordance, new RegExp('\\[' + DELETE_REGION_ATTR + '\\]:hover \\[' + DELETE_ACTION_ATTR + '\\]', 'u'),
+    'hovering a deletable row does not reveal its nested destructive host');
+  assert.match(affordance, new RegExp('\\[' + DELETE_ACTION_ATTR + '\\]\\[' + DELETE_HOVER_ATTR + '\\]', 'u'),
+    'the exact assistant owner row cannot reveal its following tail action');
+  assert.doesNotMatch(affordance, new RegExp('\\[' + DELETE_REGION_ATTR + '\\]:hover\\s*~', 'u'),
+    'hovering one row can reveal destructive actions in unrelated later turn tails');
+  assert.match(affordance, new RegExp('\\[data-chat-flow-kind="turn-tail"\\]:hover \\[' + DELETE_ACTION_ATTR + '\\]', 'u'),
     'moving into the assistant action tail hides the destructive control');
 
   const shared = fakeElement('div');
@@ -1219,6 +1259,75 @@ ok('editable regions leave pointer hover native while keeping keyboard focus vis
   delete globalThis.__ctxkitAffordanceDocument;
 });
 
+ok('assistant row hover activates only its own following-tail destructive host', () => {
+  const { deleteHosts, bindDeleteHover } = panelConsts(injectEditor(PAGE), [
+    'deleteHosts', 'deleteHoverRows', 'setDeleteHover', 'bindDeleteHover'
+  ], 'const DELETE_HOVER_ATTR = "data-ctxkit-delete-row-hover";');
+  const first = fakeElement('article');
+  const second = fakeElement('article');
+  const firstHost = fakeElement('ctxkit-action');
+  const secondHost = fakeElement('ctxkit-action');
+  firstHost.ownerRow = first;
+  secondHost.ownerRow = second;
+  deleteHosts.set(first, new Set([firstHost]));
+  deleteHosts.set(second, new Set([secondHost]));
+  bindDeleteHover(first);
+  bindDeleteHover(second);
+
+  first.dispatch('mouseenter');
+  assert.equal(firstHost.hasAttribute('data-ctxkit-delete-row-hover'), true,
+    'hovering the owner row did not reveal its following-tail action');
+  assert.equal(secondHost.hasAttribute('data-ctxkit-delete-row-hover'), false,
+    'hovering one row revealed an unrelated later turn-tail action');
+  first.dispatch('mouseleave');
+  assert.equal(firstHost.hasAttribute('data-ctxkit-delete-row-hover'), false,
+    'leaving the owner row left its destructive action active');
+});
+
+ok('assistant actions use only an adjacent tail after same-position grouped seats', () => {
+  const { assistantActionStrip } = panelConsts(injectEditor(PAGE), [
+    'flowBody', 'turnOf', 'stepPrefix', 'stepOf', 'hasToken', 'assistantActionStrip'
+  ]);
+  const row = (kind, key, turn, classList = []) => ({
+    classList,
+    nextElementSibling: null,
+    getAttribute(name) {
+      if (name === 'data-chat-flow-kind') return kind;
+      if (name === 'data-chat-flow-key') return key;
+      if (name === 'data-chat-node-key') return null;
+      if (name === 'data-chat-turn') return turn;
+      return null;
+    },
+    querySelectorAll() { return []; }
+  });
+  const chain = (...nodes) => {
+    nodes.forEach((node, index) => { node.nextElementSibling = nodes[index + 1] ?? null; });
+    return nodes;
+  };
+  const actionStrip = row(null, null, null, ['TS9iAW_actions']);
+  const tail = row('turn-tail', '9:turn-tail7', '7');
+  tail.querySelectorAll = () => [actionStrip];
+  const [owner, grouped] = chain(
+    row('assistant-step', '14:assistant-step7:1', '7'),
+    row('assistant-step', '14:assistant-step7:1', '7'),
+    tail
+  );
+  assert.equal(assistantActionStrip(owner, { turn: 7, step: 1 }), actionStrip,
+    'same-position grouped seats no longer reach their adjacent native tail');
+  assert.equal(assistantActionStrip(grouped, { turn: 7, step: 1 }), actionStrip,
+    'the last grouped seat no longer reaches its adjacent native tail');
+
+  const blockedOwner = row('assistant-step', '14:assistant-step7:1', '7');
+  chain(blockedOwner, row(null, '["process","14:assistant-step7:1","reasoning"]', '7'), tail);
+  assert.equal(assistantActionStrip(blockedOwner, { turn: 7, step: 1 }), null,
+    'an unknown intervening row lets an earlier message capture a later native tail');
+
+  const malformedOwner = row('assistant-step', '14:assistant-step7:1', '7');
+  chain(malformedOwner, row('assistant-step', '["14:assistant-step7:1","reasoning"]', '7'), tail);
+  assert.equal(assistantActionStrip(malformedOwner, { turn: 7, step: 1 }), null,
+    'an unparseable assistant sibling lets an earlier message capture a later native tail');
+});
+
 ok('a direct human row keeps distinct delete-turn and truncate-after actions without duplicates', () => {
   globalThis.__ctxkitDeleteAction = { calls: [] };
   globalThis.__ctxkitDeleteDocument = {
@@ -1238,6 +1347,8 @@ ok('a direct human row keeps distinct delete-turn and truncate-after actions wit
     'const requestMessageDeletion = () => {};',
     'const userActionStrip = (node) => node;',
     'const assistantActionStrip = () => null;',
+    'const setDeleteHover = () => {};',
+    'const bindDeleteHover = () => {};',
     'const releaseDeleteStrip = (strip) => { if (strip && strip.querySelector("[" + DELETE_ACTION_ATTR + "]") === null) strip.removeAttribute(DELETE_STRIP_ATTR); };',
     'const textLayout = () => ({ containers: [], thinks: [] });'
   ].join('\n'));
@@ -1282,6 +1393,8 @@ ok('an unmatched visible user row does not expose unusable destructive controls'
     'const requestMessageDeletion = () => { throw Error("disabled action ran"); };',
     'const userActionStrip = (node) => node;',
     'const assistantActionStrip = () => null;',
+    'const setDeleteHover = () => {};',
+    'const bindDeleteHover = () => {};',
     'const releaseDeleteStrip = (strip) => { if (strip && strip.querySelector("[" + DELETE_ACTION_ATTR + "]") === null) strip.removeAttribute(DELETE_STRIP_ATTR); };',
     'const textLayout = () => ({ containers: [], thinks: [] });'
   ].join('\n'));
@@ -1319,6 +1432,8 @@ ok('an assistant row puts one exact delete-message action in its matching native
     'const requestMessageDeletion = (entry, control) => globalThis.__ctxkitDeleteAction.calls.push([entry, control]);',
     'const userActionStrip = () => null;',
     'const assistantActionStrip = () => globalThis.__ctxkitDeleteAction.strip;',
+    'const setDeleteHover = () => {};',
+    'const bindDeleteHover = () => {};',
     'const releaseDeleteStrip = (strip) => { if (strip && strip.querySelector("[" + DELETE_ACTION_ATTR + "]") === null) strip.removeAttribute(DELETE_STRIP_ATTR); };',
     'const textLayout = () => ({ containers: [], thinks: [] });'
   ].join('\n'));
@@ -1338,10 +1453,10 @@ ok('an assistant row puts one exact delete-message action in its matching native
   assert.ok(strip.hasAttribute('data-ctxkit-delete-strip'), 'the matching native action strip was not marked');
   assert.ok(row.hasAttribute('data-ctxkit-delete-region'), 'the deletable row is not marked as the hover region');
   const style = first.shadowRoot.children.find((child) => child.tagName === 'STYLE');
-  assert.match(style.textContent, /:host\{display:inline-flex;[^}]*opacity:0;pointer-events:none/u,
-    'the delete action is visible before its message row is hovered');
-  assert.match(style.textContent, /:host-context\(\[data-ctxkit-delete-region\]:hover\)[^{]*\{opacity:1;pointer-events:auto/u,
-    'hovering the message row does not reveal the delete action');
+  assert.doesNotMatch(style.textContent, /:host\([^)]*data-native-strip[^)]*\)[^{]*\{[^}]*opacity:1/u,
+    'native-strip placement bypasses the shared hover/focus visibility rule');
+  assert.doesNotMatch(style.textContent, /:host\{[^}]*pointer-events:none/u,
+    'the shadow style makes the destructive host permanently inert');
   assert.match(style.textContent,
     /button\{[^}]*width:32px;height:32px;[^}]*border:0;[^}]*background:transparent/u,
     'the delete action is not a compact icon-only control');
@@ -1366,6 +1481,34 @@ ok('an assistant row puts one exact delete-message action in its matching native
   assert.equal(row.hasAttribute('data-ctxkit-delete-region'), false, 'an ineligible assistant row kept hover ownership');
   delete globalThis.__ctxkitDeleteAction;
   delete globalThis.__ctxkitDeleteDocument;
+});
+
+ok('grouped assistant seats choose one canonical destructive-action owner', () => {
+  const first = { key: 'shared', native: false };
+  const answer = { key: 'shared', native: true };
+  const lateReasoning = { key: 'shared', native: false };
+  const other = { key: 'other', native: false };
+  const entries = new Map([
+    ['shared', { type: 'assistant/message', seq: 41 }],
+    ['other', { type: 'assistant/message', seq: 42 }]
+  ]);
+  const { deleteOwnership } = panelConsts(injectEditor(PAGE), ['deleteOwnership'], [
+    'const STATE = { transcript: [] };',
+    'const targetOf = (node) => node.key;',
+    'const entryFor = (_transcript, key) => globalThis.__ctxkitOwnerEntries.get(key);',
+    'const deletionActions = (entry) => entry ? [{ key: "message:" + String(entry.seq) }] : [];',
+    'const userActionStrip = () => null;',
+    'const assistantActionStrip = (node) => node.native ? {} : null;'
+  ].join('\n'));
+  globalThis.__ctxkitOwnerEntries = entries;
+  const selected = deleteOwnership([first, answer, lateReasoning, other], () => undefined);
+  assert.equal(selected.deleteOwner.get('message:41'), answer,
+    'a grouped reasoning seat displaced the answer seat that owns the native tail');
+  assert.equal(selected.deleteOwner.get('message:42'), other,
+    'an unrelated assistant message lost its destructive action');
+  assert.equal([...selected.deleteOwner.keys()].filter((key) => key === 'message:41').length, 1,
+    'one assistant entry acquired duplicate destructive owners');
+  delete globalThis.__ctxkitOwnerEntries;
 });
 
 ok('turn deletion waits for confirmation, sends the exact payload, and refreshes only after Host success', async () => {
@@ -1828,19 +1971,26 @@ async function mountedPanel(replyBlocks, options = {}) {
       }
     }, { surfaceOp: 'append' });
   }
+  for (const event of options.extraEvents ?? []) {
+    if (event.surfaceOp === false) session.append(event.type, event.data);
+    else session.append(event.type, event.data, { surfaceOp: event.surfaceOp ?? 'append' });
+  }
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   const routes = [];
   const sessionForHost = () => typeof options.sessionView === 'function' ? options.sessionView(session) : session;
   const ctx = {
     get: (key) => (key === 'sessions'
-      ? { get: (id) => (String(id) === String(session.id) ? sessionForHost() : undefined) }
+      ? {
+        get: (id) => (String(id) === String(session.id) ? sessionForHost() : undefined),
+        flush: options.flush ?? (async () => true)
+      }
       : key === 'agents'
         ? options.hostAgent === undefined
           ? undefined
           : { get: (id) => (String(id) === String(session.id) ? options.hostAgent : undefined) }
         : key === 'connection'
-          ? { rpc: { handle: () => {} } }
+          ? { requestRejection: () => undefined, rpc: { handle: () => {} } }
           : key === 'webServer'
             ? { register: (route) => { routes.push(route); return () => {}; }, tapIndex: () => () => {} }
             : undefined),
@@ -1857,7 +2007,8 @@ async function mountedPanel(replyBlocks, options = {}) {
   const prepareTruncateAnchorRebase = wire.prepareTruncateAnchorRebase;
   wire.prepareTruncateAnchorRebase = (...args) => {
     anchorRebaseCalls += 1;
-    return prepareTruncateAnchorRebase(...args);
+    const prepared = prepareTruncateAnchorRebase(...args);
+    return options.wrapPrepared?.(prepared) ?? prepared;
   };
   publishEditStore(String(session.id), wire);
   const index = editableIndex(session);
@@ -2043,6 +2194,118 @@ ok('the delete route tombstones one complete human turn without mutating the log
     'the hidden turn lost its direct-human boundary');
 });
 
+ok('the delete-turn route removes every assistant and tool envelope before the next direct user message', async () => {
+  const firstCall = 'edit-gui-delete-turn-call-1';
+  const secondCall = 'edit-gui-delete-turn-call-2';
+  const panel = await mountedPanel([
+    { type: 'text', text: 'FIRST ASSISTANT STEP' },
+    { type: 'tool-call', id: llm.ToolCallId(firstCall), name: 'read', arguments: '{"path":"one"}' }
+  ], {
+    id: 'edit-gui-delete-complete-turn',
+    toolResult: { callId: firstCall, content: [{ type: 'text', text: 'FIRST TOOL RESULT' }] },
+    extraEvents: [
+      {
+        type: 'assistant/message',
+        data: {
+          turn: 1,
+          step: 2,
+          stream: [],
+          message: llm.createAssistantMessage({
+            content: [
+              { type: 'text', text: 'SECOND ASSISTANT STEP' },
+              { type: 'tool-call', id: llm.ToolCallId(secondCall), name: 'read', arguments: '{"path":"two"}' }
+            ],
+            source: { kind: 'model', provider: 'stub', model: 'stub' }
+          })
+        }
+      },
+      {
+        type: 'tool/result',
+        data: {
+          turn: 1,
+          step: 2,
+          message: llm.createToolResultMessage({
+            callId: llm.ToolCallId(secondCall),
+            content: [{ type: 'text', text: 'SECOND TOOL RESULT' }],
+            isError: false
+          })
+        }
+      },
+      {
+        type: 'assistant/message',
+        data: {
+          turn: 1,
+          step: 3,
+          stream: [],
+          message: llm.createAssistantMessage({
+            content: [{ type: 'text', text: 'FIRST TURN FINAL ANSWER' }],
+            source: { kind: 'model', provider: 'stub', model: 'stub' }
+          })
+        }
+      },
+      { type: 'turn/start', data: { turn: 2 }, surfaceOp: false },
+      {
+        type: 'user/message',
+        data: llm.createUserMessage({
+          content: [{ type: 'text', text: 'NEXT QUESTION' }],
+          source: { kind: 'user' }
+        })
+      },
+      {
+        type: 'assistant/message',
+        data: {
+          turn: 2,
+          step: 1,
+          stream: [],
+          message: llm.createAssistantMessage({
+            content: [{ type: 'text', text: 'NEXT ANSWER' }],
+            source: { kind: 'model', provider: 'stub', model: 'stub' }
+          })
+        }
+      }
+    ]
+  });
+  const before = panel.session.snapshotEvents();
+  const removed = await panel.answer(EDIT_METHODS.deleteTurn, {
+    sessionId: panel.sessionId, seq: panel.user.seq, id: panel.user.id, expected: 'QUESTION'
+  });
+  assert.equal(removed.body.result.value.ok, true, String(removed.body.result.value.reason));
+  assert.equal(panel.session.snapshotEvents().length, before.length, 'complete turn deletion mutated the source log');
+
+  const listed = (await panel.answer(EDIT_METHODS.list, { sessionId: panel.sessionId })).body.result.value;
+  assert.deepEqual(listed.transcript.map((entry) => entry.text), ['NEXT QUESTION', 'NEXT ANSWER'],
+    'an assistant, tool call, tool result, or intermediate message leaked from the deleted turn');
+  assert.equal(listed.hidden.length, 6, 'the browser did not receive every row in the deleted turn');
+  assert.ok(listed.hidden.every((entry) => entry.deletedTurn === true),
+    'one deleted member was not marked as part of the complete turn');
+
+  const nextUser = listed.transcript[0];
+  const editedBoundary = (await panel.answer(EDIT_METHODS.commit, {
+    sessionId: panel.sessionId,
+    seq: nextUser.seq,
+    id: nextUser.id,
+    block: 0,
+    expected: 'NEXT QUESTION',
+    text: 'NEXT QUESTION EDITED'
+  })).body.result.value;
+  assert.equal(editedBoundary.ok, true, JSON.stringify(editedBoundary));
+  const afterBoundaryEdit = (await panel.answer(EDIT_METHODS.list, { sessionId: panel.sessionId })).body.result.value;
+  assert.equal(afterBoundaryEdit.hidden.length, 0,
+    'a tombstone with a replaced next-user boundary must refuse atomically instead of hiding a wider slice');
+  assert.equal(afterBoundaryEdit.transcript.at(-2)?.text, 'NEXT QUESTION EDITED');
+  assert.equal(afterBoundaryEdit.transcript.at(-1)?.text, 'NEXT ANSWER');
+  assert.equal(afterBoundaryEdit.transcript[0]?.text, 'QUESTION',
+    'atomic refusal must leave the formerly deleted turn visible');
+
+  const providerMessages = panel.session.deriveMessages();
+  const providerPlan = planWireRewrite(providerMessages, panel.wire.editsFor(panel.sessionId));
+  assert.equal(providerPlan.ok, false, 'the replaced boundary must invalidate the deletion tombstone');
+  assert.equal(providerPlan.applied.length, 0);
+  assert.match(providerPlan.refused[0]?.reason ?? '', /next user-message boundary changed/u);
+  assert.equal(providerPlan.messages.length, providerMessages.length,
+    'boundary refusal must not partially remove the earlier turn');
+});
+
 ok('the delete-message route tombstones exactly one assistant envelope without mutating the log', async () => {
   const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], { id: 'edit-gui-delete-message' });
   const before = panel.session.snapshotEvents();
@@ -2132,6 +2395,40 @@ ok('truncate-after keeps the selected direct user message and hides the complete
   const reloaded = createEditStore().editsFor(panel.sessionId);
   assert.equal(reloaded.at(-1)?.kind, 'truncate-after', 'truncate-after did not survive store reload');
   assert.equal(reloaded.at(-1)?.before, 'QUESTION, CORRECTED', 'the rebased truncate anchor did not survive store reload');
+});
+
+ok('failed anchor flush stays prepared across a same-process list read', async () => {
+  const panel = await mountedPanel([{ type: 'text', text: 'ANSWER' }], {
+    id: 'edit-gui-anchor-flush-failure',
+    flush: async () => false
+  });
+  const truncated = await panel.answer(EDIT_METHODS.truncateAfter, {
+    sessionId: panel.sessionId, seq: panel.user.seq, id: panel.user.id, expected: 'QUESTION'
+  });
+  assert.equal(truncated.body.result.value.ok, true, JSON.stringify(truncated.body.result.value));
+  const oldAnchor = panel.wire.editsFor(panel.sessionId)[0]?.messageId;
+  const committed = await panel.answer(EDIT_METHODS.commit, {
+    sessionId: panel.sessionId, seq: panel.user.seq, id: panel.user.id,
+    expected: 'QUESTION', text: 'QUESTION NOT CONFIRMED'
+  });
+  const commitResult = committed.body.result.value;
+  assert.equal(commitResult.ok, false);
+  assert.equal(commitResult.appended, true);
+  assert.match(commitResult.reason, /no session persistence listener confirmed it/u);
+  assert.equal(panel.wire.editsFor(panel.sessionId)[0]?.messageId, oldAnchor,
+    'failed flush changed the in-memory truncate anchor');
+  assert.equal(existsSync(editTransactionPath(panel.sessionId)), true,
+    'failed flush removed the prepared journal');
+
+  const listed = (await panel.answer(EDIT_METHODS.list, { sessionId: panel.sessionId })).body.result.value;
+  assert.equal(listed.ok, false, 'list recovered from an unconfirmed same-process append');
+  assert.match(listed.reason, /awaiting session durability confirmation/u);
+  assert.equal(panel.wire.editsFor(panel.sessionId)[0]?.messageId, oldAnchor,
+    'list moved the anchor after failed flush');
+  assert.equal(JSON.parse(readFileSync(editStatePath(panel.sessionId), 'utf8')).edits[0]?.messageId, oldAnchor,
+    'list replaced the durable old anchor after failed flush');
+  assert.equal(existsSync(editTransactionPath(panel.sessionId)), true,
+    'list removed the failed-flush journal');
 });
 
 ok('truncate-after refuses stale direct-user identity and content', async () => {
@@ -2532,7 +2829,7 @@ ok('a row draws one pencil per editable target, keyed by seq and block', () => {
   ], [
     'const document = globalThis.__ctxkitDocument;',
     'const installAffordance = () => {}; const setDeletedVisibility = () => {};',
-    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const DELETE_STRIP_ATTR = "data-ctxkit-delete-strip"; const placeDeleteAction = () => {};',
+    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const DELETE_STRIP_ATTR = "data-ctxkit-delete-strip"; const placeDeleteAction = () => {}; const deletionActions = () => []; const deleteOwnership = (rows, hiddenFor) => ({ rowState: new Map(rows.map((node) => [node, { hidden: hiddenFor(node), entry: entryFor(STATE.transcript, targetOf(node)) }])), deleteOwner: new Map() });',
     'const generationRunning = () => globalThis.__ctxkitGeneration.running; const STOP_GENERATION = "Generation is running. Stop generation before editing or deleting history."; const say = (message, kind) => globalThis.__ctxkitGeneration.notices.push([message, kind]);',
     'const getComputedStyle = () => ({ position: "static" });',
     'const projectRow = () => {};', // Display projection is driven by the full browser regression.
@@ -2654,7 +2951,7 @@ ok('signed thinking receives the same per-block pencil as unsigned thinking', ()
   ], [
     'const document = globalThis.__ctxkitDocument;',
     'const installAffordance = () => {}; const setDeletedVisibility = () => {};',
-    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const DELETE_STRIP_ATTR = "data-ctxkit-delete-strip"; const placeDeleteAction = () => {};',
+    'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const DELETE_STRIP_ATTR = "data-ctxkit-delete-strip"; const placeDeleteAction = () => {}; const deletionActions = () => []; const deleteOwnership = (rows, hiddenFor) => ({ rowState: new Map(rows.map((node) => [node, { hidden: hiddenFor(node), entry: entryFor(STATE.transcript, targetOf(node)) }])), deleteOwner: new Map() });',
     'const generationRunning = () => globalThis.__ctxkitGeneration.running; const STOP_GENERATION = "Generation is running. Stop generation before editing or deleting history."; const say = (message, kind) => globalThis.__ctxkitGeneration.notices.push([message, kind]);',
     'const getComputedStyle = () => ({ position: "static" });',
     'const projectRow = () => {};',

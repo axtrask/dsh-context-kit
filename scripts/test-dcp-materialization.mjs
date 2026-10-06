@@ -318,8 +318,8 @@ console.log('--- the seam: a prune must change what the model receives ---');
   check('the replacement node is on the surface', session.surface.nodes.some((seq) => Number(seq) === engine.blocks.prunedNodeFor('c1')?.seq), String(engine.blocks.prunedNodeFor('c1')?.seq));
   check(
     'the transcript stays valid: the call is still answered by the same call id',
-    session.deriveMessages().filter((message) => message.content?.[0]?.type === 'tool-result').some((message) => String(message.content[0].toolCallId) === 'c2')
-      && session.deriveMessages().filter((message) => message.content?.[0]?.type === 'tool-result').length === 2,
+    session.deriveMessages().filter((message) => message.role === 'tool' && message.source?.kind === 'tool').some((message) => String(message.source.callId) === 'c2')
+      && session.deriveMessages().filter((message) => message.role === 'tool' && message.source?.kind === 'tool').length === 2,
     ''
   );
 }
@@ -556,7 +556,7 @@ console.log('\n--- the output-prune exemption reads the CALL, because the result
 
   const outgoing = session.deriveMessages();
   const assistant = outgoing.find((message) => (message.content ?? []).some((block) => block.type === 'tool-call' && block.id === 'c1'));
-  const result = outgoing.find((message) => message.content?.[0]?.toolCallId === 'c1');
+  const result = outgoing.find((message) => message.source?.kind === 'tool' && message.source?.callId === 'c1');
   check('the fixture really is a result whose source carries only a callId', assistant !== undefined && result !== undefined && result.source?.name === undefined, JSON.stringify(result?.source));
 
   const asEdit = blocks.applyToolPruning(

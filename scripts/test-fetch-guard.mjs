@@ -147,7 +147,8 @@ console.log('\n--- the registered fetch handler, with controlled HTTP and a real
     now: Date.now,
     timeout: AbortSignal.timeout,
     index: contextMode.KnowledgeBase.prototype.index,
-    sourceMeta: contextMode.KnowledgeBase.prototype.sourceMeta
+    sourceMeta: contextMode.KnowledgeBase.prototype.sourceMeta,
+    close: contextMode.KnowledgeBase.prototype.close
   };
   const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
   const observer = new contextMode.KnowledgeBase({ path: databasePath, producer: 'fetch-test', logger });
@@ -164,6 +165,13 @@ console.log('\n--- the registered fetch handler, with controlled HTTP and a real
   let onIndexed;
   let releaseSlow;
   let scope;
+  let closedPluginDatabases = 0;
+  let closedObserverDatabases = 0;
+  contextMode.KnowledgeBase.prototype.close = function () {
+    if (this === observer) closedObserverDatabases += 1;
+    else closedPluginDatabases += 1;
+    return saved.close.call(this);
+  };
   try {
     const home = join(fixture, 'home');
     mkdirSync(home);
@@ -171,7 +179,10 @@ console.log('\n--- the registered fetch handler, with controlled HTTP and a real
     delete process.env.CTX_FETCH_STRICT;
     const registered = new Map();
     const root = new Context();
-    root.provide('tools', { register: (tool) => { registered.set(tool.name, tool); return () => {}; } });
+    root.provide('tools', {
+      register: (tool) => { registered.set(tool.name, tool); return () => {}; },
+      guard: () => () => {}
+    });
     root.provide('commands', { register: () => () => {} });
     root.provide('logger', logger);
     root.provide('systemPrompt', { section: () => () => {} });
@@ -372,6 +383,9 @@ console.log('\n--- the registered fetch handler, with controlled HTTP and a real
     }
     try { await scope?.dispose(); } finally {
       observer.close();
+      contextMode.KnowledgeBase.prototype.close = saved.close;
+      check('plugin disposal closes its fetch database handle', closedPluginDatabases >= 1, String(closedPluginDatabases));
+      check('test cleanup closes the observer database handle', closedObserverDatabases === 1, String(closedObserverDatabases));
       rmSync(fixture, { recursive: true, force: true, maxRetries: 5 });
     }
   }
@@ -383,13 +397,16 @@ console.log('\n--- the output budget is one number, and it is honest ---');
   const dbDir = mkdtempSync(join(tmpdir(), 'ctx-fetch-'));
   const registered = new Map();
   const root = new Context();
-  root.provide('tools', { register: (definition) => { registered.set(definition.name, definition); return () => {}; } });
+  root.provide('tools', {
+    register: (definition) => { registered.set(definition.name, definition); return () => {}; },
+    guard: () => () => {}
+  });
   root.provide('commands', { register: () => () => {} });
   root.provide('logger', { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} });
   root.provide('systemPrompt', { section: () => () => {} });
   root.provide('workspace', { root: kitRoot });
   const contextMode = await import(pathToFileURL(join(kitRoot, 'lib', 'context-mode.js')).href);
-  root.plugin(contextMode, { knowledgeBasePath: join(dbDir, 'kb.db') });
+  const scope = root.plugin(contextMode, { knowledgeBasePath: join(dbDir, 'kb.db') });
   await new Promise((resolve) => setTimeout(resolve, 700));
 
   const exec = {
@@ -425,7 +442,7 @@ console.log('\n--- the output budget is one number, and it is honest ---');
     source: 'fetch-budget-huge'
   }, exec);
   const hugeBody = huge.rendered ?? '';
-  check('above the threshold returns only a short capture pointer', hugeBody.length < 1000 && /raw output stayed out of context/.test(hugeBody), `${hugeBody.length} chars`);
+  check('above the threshold returns only a short capture pointer', hugeBody.length < 1000 && /output stayed out of context/.test(hugeBody), `${hugeBody.length} chars`);
   check('large-output head stays out of conversation', !hugeBody.includes('LINE-0000'));
   check('large-output tail stays out of conversation', !hugeBody.includes('LINE-3999'));
   check('the notice names the real threshold', /102400/.test(hugeBody), (hugeBody.match(/\[output exceeded[^\]]*\]/) ?? ['(no notice)'])[0].slice(0, 140));
@@ -434,20 +451,9 @@ console.log('\n--- the output budget is one number, and it is honest ---');
   const doctor = registered.get('ctx_doctor');
   const report = await doctor.execute({}, exec);
   check('ctx_doctor still reports ok', report.ok === true, report.rendered?.split('\n')[0] ?? '');
-  // Windows keeps the SQLite file handle until the plugin's effect runs its
-  // disposer, so the temp directory must be released before it can be removed.
-  try {
-    if (typeof root.stop === 'function') await root.stop();
-    else if (typeof root.dispose === 'function') await root.dispose();
-  } catch {
-    /* a host that refuses the disposal still leaves a scratch directory behind */
-  }
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  try {
-    rmSync(dbDir, { recursive: true, force: true, maxRetries: 5 });
-  } catch {
-    // A locked scratch database is the host's problem, not a behaviour failure.
-  }
+  // Windows keeps the SQLite file handle until the plugin scope is disposed.
+  await scope.dispose();
+  rmSync(dbDir, { recursive: true, force: true, maxRetries: 5 });
 }
 
 if (failures.length > 0) {

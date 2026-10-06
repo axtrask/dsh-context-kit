@@ -27,6 +27,7 @@ root.provide('commands', { register: register(commands) });
 root.provide('systemPrompt', { section: register(sections) });
 root.provide('llm', llm);
 root.provide('webServer', { register: route => { routes.push(route); return () => routes.splice(routes.indexOf(route), 1); } });
+root.provide('connection', { requestRejection: () => undefined });
 let used = 60000;
 root.provide('tokenMeter', { estimateMessage: () => 1, measure: () => ({ totalTokens: used, nodes: [] }) });
 new SessionStore(root);

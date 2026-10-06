@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Prove the three knowledge-base behaviours that were wrong.
  *
  * Each of these is a user-visible defect that the port's own tests could not see,
@@ -79,19 +79,46 @@ console.log('\n--- re-indexing a label replaces it ---');
   const kb = new KnowledgeBase({ path: join(dir, 'kb.db'), producer: 'test', logger: silent });
   const first = kb.index({ source: 'verify-replace', kind: 'execute', text: 'alpha line one\nalpha line two' });
   check('the first index stores two lines', first.lines === 2, String(first.lines));
+  const db = kb.open();
+  check('new stores stay on schema 2',
+    db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get()?.value === '2');
+  check('schema 2 has no per-entry vocabulary table',
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entry_vocabulary'").get() === undefined);
+  const prepare = db.prepare.bind(db);
+  let scannedWholeCorpus = false;
+  db.prepare = (sql) => {
+    const normalized = String(sql).replace(/\s+/g, ' ').trim();
+    if (/^SELECT\b.*\btext\b.*\bFROM\s+entries\b/i.test(normalized) && !/\bWHERE\b/i.test(normalized)) {
+      scannedWholeCorpus = true;
+      throw new Error('full vocabulary rebuild is forbidden while indexing a new label');
+    }
+    return prepare(sql);
+  };
+  const added = kb.index({ source: 'verify-new', kind: 'execute', text: 'gamma stays searchable' });
+  check('a second new label uses incremental vocabulary inserts', added.lines === 1 && !scannedWholeCorpus);
+  db.prepare = prepare;
   const second = kb.index({ source: 'verify-replace', kind: 'execute', text: 'beta replaced everything' });
   check('the re-index stores the new content', second.lines === 1, String(second.lines));
-  const rows = kb.open().prepare('SELECT COUNT(*) AS n FROM entries WHERE source = ?').get('verify-replace');
+  const rows = db.prepare('SELECT COUNT(*) AS n FROM entries WHERE source = ?').get('verify-replace');
   check('the old rows are gone, not duplicated', Number(rows.n) === 1, `rows=${rows.n}`);
   const stale = kb.search('alpha', { limit: 5 });
   check('the replaced content no longer answers searches', (stale.length) === 0, JSON.stringify(stale));
   const fresh = kb.search('beta', { limit: 5 });
   check('the new content does', (fresh.length) > 0);
+  const words = db.prepare('SELECT word FROM vocabulary ORDER BY word').all().map((row) => String(row.word));
+  check('replacement rebuild removes orphaned words and keeps other labels', !words.includes('alpha') && words.includes('beta') && words.includes('gamma'), words.join(','));
   // An empty re-run must still claim the label, or a failed run silently leaves
   // the previous output answering searches.
   kb.index({ source: 'verify-replace', kind: 'execute', text: '   ' });
   const afterEmpty = kb.search('beta', { limit: 5 });
   check('an empty re-index clears the label rather than keeping stale text', (afterEmpty.length) === 0, JSON.stringify(afterEmpty));
+  check('empty replacement rebuilds vocabulary without harming other labels',
+    db.prepare('SELECT 1 FROM vocabulary WHERE word = ?').get('beta') === undefined
+      && db.prepare('SELECT 1 FROM vocabulary WHERE word = ?').get('gamma') !== undefined);
+  const purged = kb.purge({ scope: 'project' });
+  check('project purge clears entries and vocabulary', purged.removed === 1
+    && db.prepare('SELECT COUNT(*) AS n FROM entries').get().n === 0
+    && db.prepare('SELECT COUNT(*) AS n FROM vocabulary').get().n === 0);
   kb.close();
   rmSync(dir, { recursive: true, force: true });
 }

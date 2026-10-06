@@ -417,10 +417,10 @@ console.log('\n--- the extracted module is independent and preserves the plugin 
   const expectedExports = [
     'Config', 'DEFAULT_COMPRESS_PROTECTED_TOOLS', 'DEFAULT_PROTECTED_TOOLS',
     'DCP_WIRE_STATUS_LABEL', 'DCP_WIRE_STATUS_MAX_CHARS', 'DcpCompactionEngine',
-    'apply', 'engineForTest', 'finalizeDcpWireContext', 'inject', 'installDcpAddon', 'manualModeForTest',
-    'name', 'parseLimitForTest', 'resolveConfigForTest', 'stripDcpWireStatuses'
+    'apply', 'createEditCommandDescriptor', 'engineForTest', 'finalizeDcpWireContext', 'inject', 'installDcpAddon',
+    'manualModeForTest', 'name', 'parseLimitForTest', 'resolveConfigForTest', 'stripDcpWireStatuses'
   ];
-  check('the dcp entry retains its legacy exports and exposes the independent addon installer', JSON.stringify(Object.keys(dcp).sort()) === JSON.stringify(expectedExports.sort()));
+  check('the dcp entry retains its exact public export surface', JSON.stringify(Object.keys(dcp).sort()) === JSON.stringify(expectedExports.sort()));
   check('Config is the same schema object at both import paths', Config === configuration.Config);
   check('configuration test aliases are direct re-exports', ['manualModeForTest', 'parseLimitForTest', 'resolveConfigForTest'].every((key) => dcp[key] === configuration[key]));
 

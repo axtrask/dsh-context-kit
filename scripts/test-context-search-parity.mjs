@@ -103,7 +103,9 @@ try {
   assert.equal(purged.removed, 1);
   assert.equal(kb.search('sessionalpha').length, 0);
   assert.ok(kb.search('sessionbravo').some((row) => row.source === 'session-b'));
-  console.log('[ok] session purge removes A and leaves B');
+  const sessionWords = kb.open().prepare('SELECT word FROM vocabulary ORDER BY word').all().map((row) => String(row.word));
+  assert.ok(!sessionWords.includes('sessionalpha') && sessionWords.includes('sessionbravo'));
+  console.log('[ok] session purge removes A and rebuilds vocabulary from B');
 
   const mixedCaseWorkspace = join(dir, 'CaseSensitiveName');
   const upper = KnowledgeBase.defaultPath(mixedCaseWorkspace.toUpperCase());

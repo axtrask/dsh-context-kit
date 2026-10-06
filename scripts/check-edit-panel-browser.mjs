@@ -48,6 +48,39 @@ async function boot(page, current = 'A', mount = true) {
     const listeners = new Set();
     const cleanups = [];
     let registration;
+    const NativeMutationObserver = window.MutationObserver;
+    const observerRecords = [];
+    let nextObserverId = 1;
+    window.MutationObserver = class TrackedMutationObserver {
+      constructor(callback) {
+        this.record = { id: nextObserverId++, calls: 0, body: false, active: false };
+        observerRecords.push(this.record);
+        this.native = new NativeMutationObserver((records) => {
+          this.record.calls += 1;
+          callback(records, this);
+        });
+      }
+      observe(target, options) {
+        this.record.body ||= target === document.body;
+        this.record.active = true;
+        this.native.observe(target, options);
+      }
+      disconnect() { this.record.active = false; this.native.disconnect(); }
+      takeRecords() { return this.native.takeRecords(); }
+    };
+    window.ctxkitObserverRecords = () => observerRecords.map(record => ({ ...record }));
+    const watchedListeners = new Map(['focus', 'dsh-context-kit:session', 'beforeunload'].map(type => [type, new Set()]));
+    const nativeAdd = window.addEventListener.bind(window);
+    const nativeRemove = window.removeEventListener.bind(window);
+    window.addEventListener = (type, listener, options) => {
+      watchedListeners.get(type)?.add(listener);
+      return nativeAdd(type, listener, options);
+    };
+    window.removeEventListener = (type, listener, options) => {
+      watchedListeners.get(type)?.delete(listener);
+      return nativeRemove(type, listener, options);
+    };
+    window.ctxkitListenerCounts = () => Object.fromEntries([...watchedListeners].map(([type, values]) => [type, values.size]));
     window.view = {
       getSnapshot: () => snapshot,
       subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); },
@@ -252,6 +285,198 @@ const openTarget = async (chat, key) => {
   await new Promise((resolve) => setTimeout(resolve, 320));
 };
 try {
+  await check('Lifecycle: replacing and disposing the inline panel leaves no stale page hooks', async ({ page, panel, chat, settle, state }) => {
+    await settle();
+    const before = await page.evaluate(() => ({
+      observers: window.ctxkitObserverRecords(), listeners: window.ctxkitListenerCounts()
+    }));
+    const oldPanelObserver = before.observers.filter(record => record.body && record.active).at(-1);
+    assert.ok(oldPanelObserver, 'the first panel must own a body observer');
+    assert.deepEqual(before.listeners, { focus: 1, 'dsh-context-kit:session': 1, beforeunload: 1 });
+    const requests = state.requests.length;
+    await chat.locator('[data-chat-flow-key]').first().evaluate(node => node.setAttribute('data-chat-flow-key', '13:input-messageu1-replaced'));
+    await page.addScriptTag({ type: 'module', content: createPanelScript('/ctxkit.edit') });
+    await settle();
+    const replaced = await page.evaluate(oldId => ({
+      observers: window.ctxkitObserverRecords(), listeners: window.ctxkitListenerCounts(),
+      old: window.ctxkitObserverRecords().find(record => record.id === oldId),
+      launches: [...document.querySelectorAll('#dsh-context-kit-editor')]
+        .filter(host => host.shadowRoot?.querySelectorAll('.launch').length === 1).length
+    }), oldPanelObserver.id);
+    assert.equal(replaced.old.active, false, 'the first panel observer must be disconnected');
+    assert.equal(replaced.observers.filter(record => record.body && record.active).length,
+      before.observers.filter(record => record.body && record.active).length, 'replacement must not accumulate body observers');
+    assert.deepEqual(replaced.listeners, before.listeners, 'replacement must not accumulate global listeners');
+    assert.equal(replaced.launches, 1, 'replacement must leave exactly one owned host and launch button');
+    assert.equal(state.requests.length, requests + 1, 'a stale scheduled refresh must not survive replacement');
+    await page.evaluate(() => {
+      document.body.append(document.createElement('aside')).className = 'post-replacement-probe';
+      window.dispatchEvent(new Event('focus'));
+      window.dispatchEvent(new CustomEvent('dsh-context-kit:session'));
+    });
+    await settle();
+    const probed = await page.evaluate(oldId => window.ctxkitObserverRecords().find(record => record.id === oldId), oldPanelObserver.id);
+    assert.equal(probed.active, false);
+    assert.equal(probed.calls, replaced.old.calls, 'the disconnected observer must not see post-replacement shell mutations');
+    await page.evaluate(() => {
+      const lifecycle = window.__DSH_CONTEXT_KIT_EDITOR_LIFECYCLE__;
+      lifecycle.dispose(); lifecycle.dispose();
+      document.body.append(document.createElement('aside')).className = 'shell-owned';
+    });
+    await settle();
+    const disposed = await page.evaluate(() => ({
+      observers: window.ctxkitObserverRecords(), listeners: window.ctxkitListenerCounts(),
+      hosts: document.querySelectorAll('#dsh-context-kit-editor').length,
+      pencils: document.querySelectorAll('[data-ctxkit-pencil]').length,
+      projections: document.querySelectorAll('[data-ctxkit-projection]').length,
+      affordance: document.querySelectorAll('style[data-ctxkit-affordance]').length,
+      shell: document.querySelectorAll('aside.shell-owned').length
+    }));
+    assert.equal(disposed.observers.filter(record => record.body && record.active).length, 1, 'only the client body observer may remain');
+    assert.deepEqual(disposed.listeners, { focus: 0, 'dsh-context-kit:session': 0, beforeunload: 0 });
+    assert.deepEqual({ hosts: disposed.hosts, pencils: disposed.pencils, projections: disposed.projections, affordance: disposed.affordance },
+      { hosts: 0, pencils: 0, projections: 0, affordance: 0 });
+    assert.equal(disposed.shell, 1, 'panel teardown must not remove shell-owned nodes or classes');
+    assert.ok(await chat.locator('.Sixlwa_bubble.extra').count(), 'shell-owned message classes must survive teardown');
+    assert.equal(await panel.count(), 0);
+  });
+  await check('Lifecycle: client disposer restores exact pin and projection DOM twice', async ({ page, chat, state, refresh, settle }) => {
+    await page.evaluate(() => window.disposeClient());
+    const answer = state.sessions.A[1].targets.find(item => item.kind === 'text');
+    Object.assign(answer, { text: 'ANSWER EDITED', edited: true, changed: true, editStatus: 'applied' });
+    Object.assign(state.sessions.A[1], { text: answer.text, edited: true, changed: true, editStatus: 'applied' });
+    await refresh(); await settle();
+    await chat.evaluate(root => {
+      const settings = [
+        ['15:0', '[data-variant="think"]', 'position:absolute;top:3px'],
+        ['15:2', '._markdown_kcgor_5', 'margin-bottom:-12px']
+      ];
+      const pins = settings.map(([key, selector, style], index) => {
+        const pin = root.querySelector(`[data-ctxkit-for="${key}"]`);
+        const anchor = root.querySelector(selector);
+        pin.shadowRoot.querySelectorAll('[data-bottom-actions]').forEach(node => node.remove());
+        const cleanup = () => { pin.dataset.shellCleanup = String(index); };
+        pin.cleanup = cleanup;
+        pin.setAttribute('style', style);
+        if (index === 0) anchor.append(pin); else anchor.before(pin);
+        return { pin, parent: pin.parentNode, next: pin.nextSibling, style: pin.getAttribute('style'), cleanup };
+      });
+      const host = root.querySelector('[data-ctxkit-projection]');
+      const shadow = host.shadowRoot;
+      shadow.querySelectorAll('[data-copy-icons]').forEach(node => node.remove());
+      const button = shadow.querySelector('button[aria-label^="Copy effective "]');
+      button.setAttribute('class', 'shell-copy retained');
+      button.setAttribute('title', 'Shell title');
+      button.setAttribute('data-copy-state', 'shell');
+      const text = document.createTextNode('Shell copy');
+      const detail = document.createElement('em'); detail.className = 'shell-detail'; detail.textContent = ' detail';
+      button.replaceChildren(text, detail);
+      window.clientCleanupBaseline = {
+        pins, host, button, children: [...button.childNodes],
+        className: button.getAttribute('class'), title: button.getAttribute('title'), state: button.getAttribute('data-copy-state')
+      };
+    });
+    await page.evaluate(() => window.mountClient()); await settle();
+    const decorated = await page.evaluate(() => {
+      const baseline = window.clientCleanupBaseline;
+      return {
+        moved: baseline.pins.every(({ pin }) => pin.anchor?.nextElementSibling === pin),
+        pinStyles: baseline.pins.every(({ pin }) => pin.shadowRoot.querySelectorAll('[data-bottom-actions]').length === 1),
+        copyStyle: baseline.host.shadowRoot.querySelectorAll('[data-copy-icons]').length,
+        copyClass: baseline.button.classList.contains('ctxkit-copy')
+      };
+    });
+    assert.deepEqual(decorated, { moved: true, pinStyles: true, copyStyle: 1, copyClass: true });
+    await page.evaluate(() => { window.disposeClient(); window.disposeClient(); });
+    const restored = await page.evaluate(() => {
+      const baseline = window.clientCleanupBaseline;
+      return {
+        pins: baseline.pins.every(record => record.pin.parentNode === record.parent && record.pin.nextSibling === record.next
+          && record.pin.getAttribute('style') === record.style && record.pin.cleanup === record.cleanup
+          && record.pin.shadowRoot.querySelector('[data-bottom-actions]') === null),
+        children: baseline.children.length === baseline.button.childNodes.length
+          && baseline.children.every((node, index) => baseline.button.childNodes[index] === node),
+        className: baseline.button.getAttribute('class'), title: baseline.button.getAttribute('title'),
+        state: baseline.button.getAttribute('data-copy-state'),
+        copyStyles: baseline.host.shadowRoot.querySelectorAll('[data-copy-icons]').length,
+        shellClass: baseline.button.classList.contains('retained')
+      };
+    });
+    assert.deepEqual(restored, { pins: true, children: true, className: 'shell-copy retained', title: 'Shell title',
+      state: 'shell', copyStyles: 0, shellClass: true });
+    await page.evaluate(() => window.mountClient()); await settle();
+    assert.equal(await page.evaluate(() => window.clientCleanupBaseline.button.classList.contains('ctxkit-copy')), true,
+      'client behavior must still work after an idempotent cleanup and remount');
+  });
+  await check('Lifecycle: detached client pin is released without reinsertion', async ({ page, chat, settle }) => {
+    await settle();
+    await chat.evaluate(root => {
+      const pin = root.querySelector('[data-ctxkit-for="15:2"]');
+      if (!pin?.shadowRoot.querySelector('[data-bottom-actions]')) throw new Error('client did not decorate the pin');
+      window.detachedClientPin = pin;
+      pin.remove();
+    });
+    await settle();
+    assert.deepEqual(await page.evaluate(() => ({
+      connected: window.detachedClientPin.isConnected,
+      parent: window.detachedClientPin.parentNode,
+      bottomActions: window.detachedClientPin.shadowRoot.querySelectorAll('[data-bottom-actions]').length
+    })), { connected: false, parent: null, bottomActions: 0 });
+    await page.evaluate(() => window.disposeClient());
+    assert.deepEqual(await page.evaluate(() => ({
+      connected: window.detachedClientPin.isConnected,
+      parent: window.detachedClientPin.parentNode,
+      bottomActions: window.detachedClientPin.shadowRoot.querySelectorAll('[data-bottom-actions]').length
+    })), { connected: false, parent: null, bottomActions: 0 });
+  });
+  await check('Lifecycle: native pin retake survives client placement and disposal', async ({ page, chat, settle }) => {
+    await settle();
+    await chat.evaluate(root => {
+      const pin = root.querySelector('[data-ctxkit-for="15:2"]');
+      const row = pin.closest('[data-chat-flow-key]');
+      const anchor = document.createElement('section');
+      anchor.setAttribute('data-native-anchor', '');
+      anchor.setAttribute('data-ctxkit-edit', 'native');
+      const actions = document.createElement('div');
+      actions.setAttribute('data-native-actions', '');
+      row.append(anchor, actions);
+      const cleanup = () => { pin.dataset.nativeCleanupRuns = String(Number(pin.dataset.nativeCleanupRuns || 0) + 1); };
+      pin.anchor = anchor;
+      pin.regions = [anchor];
+      pin.cleanup = cleanup;
+      pin.setAttribute('style', 'position:sticky;left:9px');
+      pin.dataset.nativeOwner = 'kept';
+      actions.prepend(pin);
+      window.nativePinRetake = { pin, anchor, actions, cleanup, style: pin.getAttribute('style'), regions: pin.regions };
+    });
+    await settle();
+    await chat.evaluate(root => {
+      const probe = document.createElement('i');
+      root.append(probe);
+      probe.remove();
+    });
+    await settle();
+    const inspect = () => page.evaluate(() => {
+      const { pin, anchor, actions, cleanup, style, regions } = window.nativePinRetake;
+      return {
+        parent: pin.parentNode === actions,
+        first: actions.firstChild === pin,
+        anchor: pin.anchor === anchor,
+        cleanup: pin.cleanup === cleanup,
+        style: pin.getAttribute('style') === style,
+        regions: pin.regions === regions && pin.regions[0] === anchor,
+        regionState: anchor.getAttribute('data-ctxkit-edit'),
+        owner: pin.dataset.nativeOwner,
+        cleanupRuns: pin.dataset.nativeCleanupRuns || '0',
+        bottomActions: pin.shadowRoot.querySelectorAll('[data-bottom-actions]').length
+      };
+    });
+    const expected = { parent: true, first: true, anchor: true, cleanup: true, style: true,
+      regions: true, regionState: 'native', owner: 'kept', cleanupRuns: '0', bottomActions: 0 };
+    assert.deepEqual(await inspect(), expected, 'client placement must stop after native ownership changes');
+    await page.evaluate(() => window.disposeClient());
+    assert.deepEqual(await inspect(), expected, 'client disposal must preserve the native placement baseline exactly');
+  });
   for (const width of [1280, 390]) await check(`Served legacy: client update moves existing controls below blocks at ${width}`, async ({ page, chat, settle, state }) => {
     await chat.locator('[data-process-reasoning]').evaluate(n => n.removeAttribute('hidden'));
     await chat.locator('[data-fold]').click();
@@ -424,8 +649,8 @@ try {
       'keyboard focus no longer reaches editable text after its pin moves into the native action strip');
     await page.locator('#outside-focus').focus(); await settle();
 
-    const assistant = chat.locator('[data-chat-flow-kind="assistant-step"]');
-    const tail = chat.locator('[data-chat-flow-kind="turn-tail"]');
+    const assistant = chat.locator('[data-chat-flow-key="14:assistant-step15:1"]');
+    const tail = chat.locator('[data-chat-flow-kind="turn-tail"][data-chat-turn="15"]');
     const tailStrip = tail.locator('.TS9iAW_actions');
     const assistantDelete = tailStrip.locator('[data-ctxkit-delete="message:15"]');
     assert.equal(await assistantDelete.count(), 1, 'the assistant delete icon is not in its matching native tail');
@@ -474,18 +699,54 @@ try {
     assert.equal(await tailStrip.locator('[data-ctxkit-delete="message:15"]').count(), 1,
       'the assistant action did not return after the matching tail became immediate again');
 
+    await assistant.evaluate((node) => node.after(node.cloneNode(true)));
+    await refresh(); await settle();
+    await assertOneAssistantDelete('two DOM rows for one assistant message received duplicate destructive actions');
+    await chat.locator('[data-chat-flow-kind="assistant-step"]').last().evaluate((node) => node.remove());
+    await refresh(); await settle();
+    await assertOneAssistantDelete('removing a transient duplicate row lost or duplicated the assistant action');
+
+    const nativeTailCopy = tailStrip.locator('[data-native-tail-copy]');
     await page.locator('#outside-focus').hover(); await settle();
-    assert.equal(await tailStrip.evaluate((n) => getComputedStyle(n).opacity), '0', 'the destructive strip is visible at rest');
+    assert.equal(await tailStrip.evaluate((n) => getComputedStyle(n).opacity), '1',
+      'Context Kit hides the native assistant action strip at rest');
+    assert.equal(await nativeTailCopy.evaluate((n) => getComputedStyle(n).pointerEvents), 'auto',
+      'Context Kit disables a native assistant action at rest');
+    assert.equal(await assistantDelete.evaluate((n) => getComputedStyle(n).opacity), '0',
+      'the destructive icon is visible at rest');
+    assert.equal(await assistantDelete.evaluate((n) => getComputedStyle(n).pointerEvents), 'none',
+      'the hidden destructive icon still captures the pointer');
+
+    state.sessions.A.push(entry(18, [target(0, 'reasoning', '**THINK A**\nsecond line'), target(2, 'text', 'ANSWER')]));
+    await chat.evaluate((flow, html) => flow.insertAdjacentHTML('beforeend', html), assistantRow(18) + assistantTail(18));
+    await refresh(); await settle();
+    const laterDelete = chat.locator('[data-ctxkit-delete="message:18"]');
+    assert.equal(await laterDelete.count(), 1, 'the later assistant fixture has no destructive action');
+
     await assistant.hover(); await settle();
-    const pointerPaint = await chat.locator('._markdown_kcgor_5').evaluate((n) => {
+    const pointerPaint = await assistant.locator('._markdown_kcgor_5').evaluate((n) => {
       const style = getComputedStyle(n);
       return { outline: style.outlineStyle, shadow: style.boxShadow };
     });
     assert.equal(pointerPaint.outline, 'none', 'pointer hover still paints a plugin outline');
     assert.equal(pointerPaint.shadow, 'none', 'pointer hover still paints a plugin glow');
-    assert.equal(await tailStrip.evaluate((n) => getComputedStyle(n).opacity), '1', 'assistant hover does not reveal its delete icon');
+    assert.equal(await assistantDelete.evaluate((n) => getComputedStyle(n).opacity), '1',
+      'assistant hover does not reveal its delete icon');
+    assert.equal(await assistantDelete.evaluate((n) => getComputedStyle(n).pointerEvents), 'auto',
+      'the revealed delete icon cannot receive a pointer click');
+    assert.equal(await laterDelete.evaluate((n) => getComputedStyle(n).opacity), '0',
+      'hovering one assistant revealed an unrelated later turn-tail action');
+    state.sessions.A.pop();
+    await chat.locator('[data-chat-flow-key="14:assistant-step18:1"], [data-chat-flow-kind="turn-tail"][data-chat-turn="18"]').evaluateAll((nodes) => nodes.forEach((node) => node.remove()));
+    await refresh(); await settle();
+
     await tailStrip.hover(); await settle();
-    assert.equal(await tailStrip.evaluate((n) => getComputedStyle(n).opacity), '1', 'moving into the native tail hides its delete icon');
+    assert.equal(await assistantDelete.evaluate((n) => getComputedStyle(n).opacity), '1',
+      'moving into the native tail hides its delete icon');
+    await page.locator('#outside-focus').hover();
+    await assistantDelete.locator('button').focus(); await settle();
+    assert.equal(await assistantDelete.evaluate((n) => getComputedStyle(n).opacity), '1',
+      'keyboard focus does not reveal the delete icon');
 
     state.sessions.A.splice(0, 1);
     await page.evaluate(() => window.dispatchEvent(new Event('dsh-context-kit:session'))); await settle();

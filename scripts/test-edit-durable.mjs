@@ -319,6 +319,54 @@ console.log('--- a durable edit of the user\'s own message ---');
   check('the failed durable append changes neither request nor tail', !viewText(session).includes('should not survive a failed append')
     && viewText(session).includes('SECOND QUESTION'), viewText(session));
 
+  const flushSession = await own(store, 'edit-durable-flush-rejection');
+  flushSession.append('user/message', llm.createUserMessage({ content: [text('FLUSH ORIGINAL')], source: { kind: 'user' } }), { surfaceOp: 'append' });
+  let flushRecoveryState = 'prepared';
+  let flushRollbackCalls = 0;
+  let flushCommitCalls = 0;
+  const flushFailure = await durable.runEditCommand({
+    session: flushSession,
+    agent: {
+      status: 'idle',
+      ctx: { get: (key) => key === 'sessions' ? { flush: async () => { throw new Error('simulated flush rejection'); } } : undefined }
+    },
+    store: {
+      prepareTruncateAnchorRebase: () => ({
+        ok: true,
+        commit: () => { flushCommitCalls += 1; flushRecoveryState = 'cleared'; return { ok: true }; },
+        rollback: () => { flushRollbackCalls += 1; flushRecoveryState = 'rolled back'; return { ok: true }; }
+      })
+    },
+    config: on,
+    rawInput: '-1 FLUSH REPLACEMENT'
+  });
+  check('a flush rejection after append reports recovery instead of success', flushFailure.kind === 'error'
+    && /appended/u.test(flushFailure.text) && /flush rejection/u.test(flushFailure.text), flushFailure.text);
+  check('a flush rejection keeps prepared recovery data and never rolls back the append', flushRecoveryState === 'prepared'
+    && flushCommitCalls === 0 && flushRollbackCalls === 0, `${flushRecoveryState}/${flushCommitCalls}/${flushRollbackCalls}`);
+
+  const commitSession = await own(store, 'edit-durable-commit-refusal');
+  commitSession.append('user/message', llm.createUserMessage({ content: [text('COMMIT ORIGINAL')], source: { kind: 'user' } }), { surfaceOp: 'append' });
+  let commitRecoveryState = 'prepared';
+  let commitRollbackCalls = 0;
+  const commitFailure = await durable.runEditCommand({
+    session: commitSession,
+    agent: { status: 'idle', ctx: { get: (key) => key === 'sessions' ? { flush: async () => true } : undefined } },
+    store: {
+      prepareTruncateAnchorRebase: () => ({
+        ok: true,
+        commit: () => ({ ok: false, reason: 'simulated journal clear failure' }),
+        rollback: () => { commitRollbackCalls += 1; commitRecoveryState = 'rolled back'; return { ok: true }; }
+      })
+    },
+    config: on,
+    rawInput: '-1 COMMIT REPLACEMENT'
+  });
+  check('a refused rebase commit after flush is propagated', commitFailure.kind === 'error'
+    && /journal clear failure/u.test(commitFailure.text), commitFailure.text);
+  check('a refused rebase commit keeps prepared recovery data and never rolls back the append', commitRecoveryState === 'prepared'
+    && commitRollbackCalls === 0, `${commitRecoveryState}/${commitRollbackCalls}`);
+
   const written = durable.runEditCommand({ session, agent: idle, config: { enabled: true, requireIdle: false }, rawInput: '-1 changed while idle' });
   check('the same legacy config still permits an idle write', written.kind === 'success', written.text);
   await new Promise((resolve) => setTimeout(resolve, 0));

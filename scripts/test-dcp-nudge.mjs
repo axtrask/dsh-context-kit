@@ -68,6 +68,20 @@ function engineFor(config, totalTokens) {
     }
   };
   engine.dcpConfig = dcp.Config(config ?? {});
+  engine._persistedBlockVersions = new Map();
+  engine.guardCounts = {
+    automaticScheduled: 0,
+    automaticCoalesced: 0,
+    automaticExecuted: 0,
+    automaticFlushed: 0,
+    automaticSkippedClean: 0,
+    automaticCanceled: 0,
+    planningSnapshots: 0,
+    saveCalls: 0,
+    saveSkippedClean: 0,
+    saveSerializations: 0,
+    saveWrites: 0
+  };
   engine.stats = { deduplicationRuns: 0, deduplicationNodes: 0, purgeErrorRuns: 0, purgeErrorNodes: 0, compressions: 0, compressionNodes: 0 };
   engine.ctx.logger.messages = messages;
   return { engine, warnings };

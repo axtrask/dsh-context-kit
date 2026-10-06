@@ -104,6 +104,8 @@ class FakeConnection extends Service {
   channels = [];
   constructor(ctx) {
     super(ctx, 'connection');
+    // The direct editor route delegates the request-role check to Connection.
+    this.requestRejection = () => undefined;
     this.rpc = {
       handle: (channel, handler) => {
         const entry = { channel, handler };
