@@ -6,7 +6,8 @@
   "description": "Native DeepSeek Harness integrations for DCP, Context Mode, and History Editor.",
   "license": "UNLICENSED",
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=22.19.0",
+    "dsh": "0.2.0-rc.2 || ^0.2.1-rc.2"
   },
   "exports": {
     ".": "./lib/index.js",
