@@ -67,6 +67,24 @@ const meta = readPluginMeta('dsh-context-kit', parentURL);
 const title = typeof meta?.title === 'string' ? meta.title : meta?.title?.en;
 assert.equal(title, 'Context Kit', 'the aggregate Loader package must expose its Web display metadata');
 
+// 0.2.1 renames display metadata: a subpath plugin never reads its own package.json, so
+// its title and description come from <subpath>/locale/<language>.json only.
+for (const [specifier, expected] of [
+  ['dsh-context-kit/dcp-plugin', 'DCP'],
+  ['dsh-context-kit/context-mode-plugin', 'Context Mode'],
+  ['dsh-context-kit/editor-plugin', 'History Editor'],
+  ['dsh-context-kit/plugin', 'Context Kit'],
+]) {
+  const subpathMeta = readPluginMeta(specifier, parentURL);
+  const subpathTitle = typeof subpathMeta?.title === 'string' ? subpathMeta.title : subpathMeta?.title?.en;
+  assert.equal(subpathTitle, expected, `${specifier} must resolve its display title from locale/<subpath>/en.json`);
+  assert.equal(subpathMeta?.error, undefined, `${specifier} must publish clean display metadata`);
+}
+for (const subpath of ['./dcp-plugin', './context-mode-plugin', './editor-plugin', './plugin']) {
+  assert.equal(manifest.exports?.[`${subpath}/package.json`], undefined,
+    `${subpath}/package.json must not be exported: 0.2.1 never reads a subpath manifest`);
+}
+
 function parseRows(source) {
   return [...source.matchAll(/^ {4}- id:\s*([^\r\n]+)\r?\n {6}name:\s*([^\r\n]+)\r?\n {6}disabled:\s*(true|false)\s*$/gmu)]
     .map(([, id, name, disabled]) => ({ id: id.trim(), name: name.trim(), disabled: disabled === 'true' }));
