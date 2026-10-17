@@ -32,14 +32,35 @@ Use `plugin_manager install_bundle` with the absolute repository root:
 }
 ```
 
-The Plugin Manager installs ordinary dependencies, resolves the exact optional Harness
-peers from the DSH installation, applies `cordis.patch.yml`, and owns subsequent updates.
-Do not copy the package under `DSH_HOME`, edit profile files, create a `node_modules`
-junction, or apply a separate preset.
+The Plugin Manager links the checkout, installs its ordinary dependencies, applies
+`cordis.patch.yml`, and owns subsequent updates. Do not copy the package under
+`DSH_HOME`, edit profile files, create a `node_modules` junction, or apply a separate
+preset.
 
 The bundle patch inserts one aggregate Context Kit row and one relative nested CDSH row.
 Both rows resolve from the installed bundle, so the composition remains portable across
 DSH and Node.js installation locations.
+
+## Harness peer resolution
+
+Harness packages are declared once, as optional `peerDependencies`, and never vendored.
+From DSH 0.2.1 the profile's runtime resolution intercepts imports made inside a linked
+package and serves them from the running installation, so `node_modules` holds only this
+package's own `dependencies` (`undici`) — one `cordis` and one `schemastery` per process,
+both owned by the host.
+
+Two rules keep that working:
+
+- **Every bare `@deepseek-ai/*` import needs a matching peer.** The linked-package route
+  only takes over names that the importing package's `peerDependencies` list; an
+  undeclared name falls back to plain Node resolution and fails in a clean checkout.
+- **`engines.dsh` decides compatibility alone.** When it is present, DSH ignores the peer
+  ranges entirely, so the peer ranges stay informational and must merely allow every
+  runtime the code still supports (`0.2.0-rc.2 || ^0.2.1-rc.2`).
+
+Do not "fix" a missing module by installing it into this checkout: a second copy of
+`cordis` or `schemastery` splits the service registries and breaks the plugin silently.
+
 
 ## Development checks
 

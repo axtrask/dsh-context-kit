@@ -13,13 +13,13 @@ const patch = await readFile(join(root, 'cordis.patch.yml'), 'utf8');
 const client = await readFile(join(root, 'lib', 'edit-client.js'), 'utf8');
 
 const expectedPeers = {
-  '@deepseek-ai/dsh-client-connection': '0.2.0-rc.2',
-  '@deepseek-ai/dsh-compaction-basic': '0.2.0-rc.2',
-  '@deepseek-ai/dsh-llm': '0.2.0-rc.2',
-  '@deepseek-ai/dsh-session': '0.2.0-rc.2',
-  '@deepseek-ai/dsh-tools': '0.2.0-rc.2',
-  '@deepseek-ai/dsh-util-values': '0.2.0-rc.2',
-  '@deepseek-ai/schemastery': '3.18.4',
+  '@deepseek-ai/dsh-client-connection': '0.2.0-rc.2 || ^0.2.1-rc.2',
+  '@deepseek-ai/dsh-compaction-basic': '0.2.0-rc.2 || ^0.2.1-rc.2',
+  '@deepseek-ai/dsh-llm': '0.2.0-rc.2 || ^0.2.1-rc.2',
+  '@deepseek-ai/dsh-session': '0.2.0-rc.2 || ^0.2.1-rc.2',
+  '@deepseek-ai/dsh-tools': '0.2.0-rc.2 || ^0.2.1-rc.2',
+  '@deepseek-ai/dsh-util-values': '0.2.0-rc.2 || ^0.2.1-rc.2',
+  '@deepseek-ai/schemastery': '^3.18.4',
 };
 
 assert.equal(manifest.name, 'dsh-context-kit');
