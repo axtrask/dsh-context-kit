@@ -77,7 +77,8 @@ The publication root is `dsh-context-kit` version `0.1.11`:
 - `cordis.patch.yml` declares the two supported Loader rows;
 - `packages/cdsh/` is the only nested package;
 - `undici` is the only ordinary runtime dependency;
-- compatible Harness libraries are exact optional peers supplied by the installation.
+- compatible Harness libraries are optional peers supplied by the installation and never
+  vendored into the checkout.
 
 Development runtime generations are not part of the package. There are no `runtime`, `runtime-2`, or later cache-busting snapshots and no absolute machine paths in the packed files.
 

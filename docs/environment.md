@@ -32,8 +32,10 @@ Use `plugin_manager install_bundle` with the absolute repository root:
 }
 ```
 
-The Plugin Manager links the checkout, installs its ordinary dependencies, applies
-`cordis.patch.yml`, and owns subsequent updates. Do not copy the package under
+The Plugin Manager links the checkout, applies `cordis.patch.yml`, and owns subsequent
+updates. A linked checkout supplies nothing but its own files: `pnpm add` does not
+install the dependency tree of a `link:` target, so run `pnpm install` once inside the
+checkout to put `undici` in its `node_modules`. Do not copy the package under
 `DSH_HOME`, edit profile files, create a `node_modules` junction, or apply a separate
 preset.
 
@@ -60,7 +62,6 @@ Two rules keep that working:
 
 Do not "fix" a missing module by installing it into this checkout: a second copy of
 `cordis` or `schemastery` splits the service registries and breaks the plugin silently.
-
 
 ## Development checks
 
