@@ -1717,5 +1717,75 @@ check('session disposal evicts settled editor state', restartedWireStore.session
 disposeRestartedWire();
 check('wire disposal removes both public event listeners', wireListener === undefined && disposedListener === undefined);
 
+/* --------------------------------------- block deletion and restoration */
+
+const blockRequest = freezeRequest([
+  { id: 'bsys', role: 'system', content: 'SYSTEM' },
+  userMessage('bu1', text('Run two tools')),
+  assistantMessage('ba1', { type: 'reasoning', text: 'THINK' }, call('bcall', 'read', '{"filePath":"a.js"}')),
+  hostResultMessage('br1', 'bcall', 'FILE BODY'),
+  assistantMessage('ba2', text('Second answer'), call('bcall2', 'grep', '{"pattern":"x"}')),
+  hostResultMessage('br2', 'bcall2', 'MATCH'),
+  userMessage('bu2', text('Keep me'))
+], 'block-delete').messages;
+
+const toolBlockStore = edit.createEditStore({ restore: false });
+const toolBlock = toolBlockStore.deleteBlock('block-delete', blockRequest, {
+  messageIndex: 2, messageId: 'ba1', blockAt: 1
+});
+check('deleting a tool call records a paired block tombstone', toolBlock.ok === true
+  && toolBlock.edit?.kind === 'delete-block' && toolBlock.edit?.toolCallId === 'bcall'
+  && toolBlock.edit?.targets?.length === 2, JSON.stringify(toolBlock));
+const toolPlan = edit.planWireRewrite(blockRequest, toolBlockStore.editsFor('block-delete'));
+check('the tool call and its result leave the request together while the thinking stays',
+  toolPlan.refused.length === 0
+    && toolPlan.messages.map((message) => message.id).join(',') === 'bsys,bu1,ba1,ba2,br2,bu2'
+    && toolPlan.messages.find((message) => message.id === 'ba1')?.content.length === 1,
+  JSON.stringify({ refused: toolPlan.refused, ids: toolPlan.messages.map((message) => message.id) }));
+
+const restoreStore = edit.createEditStore({ restore: false });
+const restoreDelete = restoreStore.deleteBlock('block-restore', blockRequest, {
+  messageIndex: 2, messageId: 'ba1', blockAt: 1
+});
+const restored = restoreStore.restore('block-restore', restoreDelete.edit.id, blockRequest);
+const restoredPlan = edit.planWireRewrite(blockRequest, restoreStore.editsFor('block-restore'));
+check('restoring a deletion brings the same call and result back', restored.ok === true
+  && restoredPlan.changed === false
+  && restoredPlan.messages.map((message) => message.id).join(',')
+    === 'bsys,bu1,ba1,br1,ba2,br2,bu2',
+  JSON.stringify({ restored, refused: restoredPlan.refused }));
+check('a restored tombstone stays in the audit trail but is skipped',
+  restoreStore.editsFor('block-restore').length === 1
+    && restoreStore.editsFor('block-restore')[0].restored === true,
+  JSON.stringify(restoreStore.editsFor('block-restore')));
+check('a second restoration is refused', restoreStore.restore('block-restore', restoreDelete.edit.id, blockRequest).ok === false);
+
+const textBlockStore = edit.createEditStore({ restore: false });
+const secondBlock = textBlockStore.deleteBlock('block-text', blockRequest, {
+  messageIndex: 4, messageId: 'ba2', blockAt: 0
+});
+const secondPlan = edit.planWireRewrite(blockRequest, textBlockStore.editsFor('block-text'));
+check('deleting one text block keeps the sibling tool call and following history',
+  secondBlock.ok === true && secondPlan.refused.length === 0
+    && secondPlan.messages.find((message) => message.id === 'ba2')?.content.length === 1
+    && secondPlan.messages.find((message) => message.id === 'ba2')?.content[0]?.type === 'tool-call'
+    && secondPlan.messages.map((message) => message.id).join(',')
+      === 'bsys,bu1,ba1,br1,ba2,br2,bu2',
+  JSON.stringify({ refused: secondPlan.refused, block: secondPlan.messages.find((message) => message.id === 'ba2') }));
+
+const rawOriginStore = edit.createEditStore({ restore: false });
+rawOriginStore.deleteBlock('block-origin', blockRequest, { messageIndex: 4, messageId: 'ba2', blockAt: 0 });
+const originEdits = rawOriginStore.editsFor('block-origin');
+const originPlan = edit.planWireRewrite(blockRequest, originEdits);
+check('raw block origins survive deletion so the next block is not renumbered',
+  originPlan.blockOrigins[4]?.join(',') === '1'
+    && originEdits[0]?.block === 0,
+  JSON.stringify({ origins: originPlan.blockOrigins[4], edit: originEdits[0]?.block }));
+
+const userBlockRefusal = edit.createEditStore({ restore: false }).deleteBlock('block-user', blockRequest, {
+  messageIndex: 1, messageId: 'bu1', blockAt: 0
+});
+check('a direct user block is refused in favour of deleting its turn', userBlockRefusal.ok === false);
+
 console.log(`\n${failures.length === 0 ? 'all edit behaviour tests passed' : `${failures.length} FAILURES: ${failures.join('; ')}`}`);
 process.exit(failures.length === 0 ? 0 : 1);

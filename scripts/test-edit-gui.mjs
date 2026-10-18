@@ -34,7 +34,7 @@ import { Session, SessionId, SessionStore } from '@deepseek-ai/dsh-session';
 import { EDIT_CHANNEL, EDIT_METHODS, SESSION_KEY, injectEditor, installEditGui, panelEntry } from '../lib/edit-gui.js';
 import { createChannelHandler } from '../lib/edit-route.js';
 import { createPanelScript } from '../lib/edit-panel.js';
-import { blockTargets, commitUserEdit, editableIndex, effectiveEditableIndex, editability, renderEditableList } from '../lib/edit-durable.js';
+import { blockTargets, deletionOperations, commitUserEdit, editableIndex, effectiveEditableIndex, editability, renderEditableList } from '../lib/edit-durable.js';
 import { createEdit, createEditStore, editStatePath, editTransactionPath, planWireRewrite } from '../lib/edit.js';
 import { publishEditStore, publishEngine, resetBridgeForTest } from '../lib/edit-bridge.js';
 
@@ -217,12 +217,17 @@ ok('both served stylesheets keep their rules and browser escape layers', () => {
   assert.ok(css.includes('.wrap.open { display: block; }'));
   assert.ok(css.includes('width: min(760px, 92vw)'));
   assert.ok(css.includes('button:disabled { opacity: .5; cursor: default; }'));
-  assert.ok(css.endsWith('footer.good { color: #8ee0a8; }'));
-  assert.ok(pinCss.startsWith(':host { position: relative; display: flex;'));
+  assert.ok(css.includes('footer.good { color: var(--dsw-alias-state-success-primary); }'),
+    'the footer lost the theme success colour');
+  // The explicit icon toolbar floats over its block: no resting box, no layout shift.
+  assert.ok(pinCss.startsWith(':host { position: absolute;'), 'the action toolbar must not occupy message flow');
+  assert.ok(pinCss.includes('pointer-events: none'), 'the resting toolbar must not intercept text gestures');
+  assert.ok(pinCss.includes(':host(:focus-within), :host([data-hover]), :host([data-editing])'),
+    'hover, keyboard focus, and editing must be the only ways to reveal the toolbar');
   assert.ok(pinCss.includes('min-height: 44px; min-width: 44px;'));
-  assert.ok(!/position:\s*(sticky|fixed|absolute)/.test(pinCss), 'editor actions must stay in flow below their block');
-  assert.match(pinCss, /:host\(\[data-editing\]\) \{[^}]*background: transparent;[^}]*box-shadow: none;/u,
-    'the inline actions still paint the detached white pill');
+  assert.ok(pinCss.includes('@media (hover: none)'), 'touch has no hover, so its controls must stay available');
+  assert.match(pinCss, /:host\(\[data-editing\]\) \{[^}]*position: relative;[^}]*background: transparent;/u,
+    'the inline editor must return to document flow while editing');
   assert.ok(!pinCss.includes('var(--studio-panel') && !pinCss.includes('var(--studio-shadow'),
     'the inline actions still depend on the legacy surface palette');
   assert.match(css, /\.save:not\(\.accept\), \.cancel \{[^}]*width: 28px;[^}]*height: 28px;[^}]*background: transparent;/u,
@@ -620,7 +625,22 @@ ok('Chat CSS tokens match only the two complete module naming formats', () => {
   }
 });
 
-ok('the Host answers six methods while the editor surface invokes LIST instead of STATUS', () => {
+ok('deletion operations expose only active, restorable tombstones', () => {
+  const operations = deletionOperations([
+    { id: 'op-1', kind: 'delete-block', messageId: 'm1', block: 2, before: 'BLOCK', targets: [{ messageId: 'm1', blocks: [{ at: 2, identity: { type: 'text' }, text: 'BLOCK' }] }] },
+    { id: 'op-2', kind: 'delete-turn', messageId: 'm2', before: 'TURN', members: [{ id: 'm2' }, { id: 'm3' }] },
+    { id: 'op-3', kind: 'delete-message', messageId: 'm4', restored: true }
+  ], { applied: [{ id: 'op-1', kind: 'delete-block' }] });
+  assert.deepEqual(operations.map((operation) => operation.id), ['op-1', 'op-2'],
+    'a restored tombstone must leave the recovery list');
+  assert.deepEqual(operations[0].removedIds, ['m1']);
+  assert.equal(operations[0].applied, true, 'an applied tombstone must be marked as such');
+  assert.deepEqual(operations[0].removedBlocks, [{ at: 2, kind: 'text', text: 'BLOCK', messageId: 'm1', whole: false }]);
+  assert.deepEqual(operations[1].removedIds, ['m2', 'm3']);
+  assert.equal(operations[1].applied, false);
+});
+
+ok('the Host answers every advertised method while the panel never duplicates STATUS', () => {
   const source = readFileSync(join(ROOT, 'lib', 'edit-gui.js'), 'utf8');
   const panel = injectEditor(PAGE);
   for (const method of Object.values(EDIT_METHODS)) {
@@ -628,7 +648,9 @@ ok('the Host answers six methods while the editor surface invokes LIST instead o
     if (method !== EDIT_METHODS.status) assert.ok(panel.includes(`'${method}'`), `${method} is never called by the panel`);
   }
   assert.ok(!panel.includes(`call('${EDIT_METHODS.status}'`), 'the editor surface still issues a duplicate STATUS read');
-  assert.deepEqual(Object.keys(EDIT_METHODS).sort(), ['commit', 'deleteMessage', 'deleteTurn', 'list', 'status', 'truncateAfter']);
+  assert.deepEqual(Object.keys(EDIT_METHODS).sort(), [
+    'commit', 'deleteBlock', 'deleteMessage', 'deleteTurn', 'list', 'restore', 'status', 'truncateAfter'
+  ]);
 });
 
 ok('the transcript omits unavailable markers while refused saves retain panel feedback', () => {
@@ -1145,18 +1167,20 @@ ok('the decorator hides only the exact assistant row for a delete-message tombst
   process.setAttribute('data-chat-turn', '8');
   const rows = [exact, sibling, process];
   globalThis.__ctxkitHiddenDocument = {
-    querySelectorAll: (selector) => selector === '[data-chat-flow] > [data-chat-flow-key]' ? rows : []
+    querySelectorAll: (selector) => selector === '[data-chat-flow] [data-chat-flow-key]' ? rows : []
   };
   const { STATE, HIDDEN_TURN_ATTR, decorateTranscript } = panelConsts(injectEditor(PAGE), [
     'STATE', 'FLOW_SELECTOR', 'HIDDEN_TURN_ATTR', 'flowBody', 'messageIdOf', 'turnOf', 'stepPrefix', 'stepOf',
     'entryFor', 'targetOf', 'deletedTurnsOf', 'deletedEntryFor', 'projections', 'pinnedRows',
     'rowOwners', 'hiddenRows', 'setDeletedVisibility', 'decorateTranscript'
   ], [
+    'const textLayout = () => ({ targets: [], texts: [], thoughts: [], containers: [1], thinks: [1] });',
     'const document = globalThis.__ctxkitHiddenDocument;',
     'const flowRows = () => [...document.querySelectorAll(FLOW_SELECTOR)];',
     'const running = () => false; const installAffordance = () => {};',
     'const DELETE_ACTION_ATTR = "data-ctxkit-delete"; const DELETE_REGION_ATTR = "data-ctxkit-delete-region"; const DELETE_STRIP_ATTR = "data-ctxkit-delete-strip"; const PENCIL_ATTR = "data-ctxkit-pencil";',
-    'const projectRow = () => {}; const placeDeleteAction = () => {}; const deletionActions = () => []; const deleteOwnership = (rows, hiddenFor) => ({ rowState: new Map(rows.map((node) => [node, { hidden: hiddenFor(node), entry: entryFor(STATE.transcript, targetOf(node)) }])), deleteOwner: new Map() });'
+    'const projectRow = () => {}; const placeDeleteAction = () => {}; const deletionActions = () => []; const deleteOwnership = (rows, hiddenFor) => ({ rowState: new Map(rows.map((node) => [node, { hidden: hiddenFor(node), entry: entryFor(STATE.transcript, targetOf(node)) }])), deleteOwner: new Map() });',
+    'const decorateBlocks = () => {}; const decorateRowRestores = () => {}; const blockViews = new Set(); const toolControls = new Map(); const rowRestores = new Map();'
   ].join('\n'));
   STATE.sessionId = 'test-session';
   STATE.hidden = [{ type: 'assistant/message', turn: 8, step: 2, id: 'reply-8', deletedMessage: true, deletedTurn: false }];
@@ -1220,8 +1244,8 @@ ok('editable regions leave pointer hover native while keeping keyboard focus vis
     'the plugin still paints a second pointer-hover outline');
   assert.doesNotMatch(affordance, /box-shadow/u, 'the plugin still adds a pointer-hover glow');
   assert.match(affordance,
-    /\[data-chat-flow\] > \[data-chat-flow-key\]:has\(\[data-ctxkit-pencil\]:focus-within\) \[data-ctxkit-edit\] \{ outline: 2px solid/u,
-    'keyboard focus no longer identifies the editable region from a native action strip');
+    /\[data-chat-flow\] \[data-chat-flow-key\]:has\(\[data-ctxkit-pencil\]:focus-within\) \[data-ctxkit-edit\] \{ outline: 2px solid/u,
+    'keyboard focus no longer identifies the editable region');
   assert.doesNotMatch(affordance, new RegExp('\\[' + DELETE_STRIP_ATTR + '\\]\\s*\\{', 'u'),
     'Context Kit still changes the shell-owned native action strip');
   assert.match(
@@ -2791,7 +2815,9 @@ ok('edited Thinking projects through one stable wrapper without changing disclos
     const hosts = row.querySelectorAll('[data-ctxkit-projection]');
     assert.equal(hosts.length, 1, `${expanded ? 'expanded' : 'collapsed'} Thinking got more than one projection wrapper`);
     assert.equal(projections.get(row)?.size, 1, 'one Thinking target created more than one projection record');
-    assert.ok(hosts[0].shadowRoot.querySelector('button'), 'the single projection wrapper lost its copy control');
+    // Copy lives in the floating block toolbar now; an unknown-layout fallback keeps its own copy.
+    assert.equal(hosts[0].shadowRoot.querySelector('button'), null,
+      'the effective-text projection painted a second copy control over a native block');
     const firstHost = hosts[0];
     projectRow(row, entry);
     assert.deepEqual(row.querySelectorAll('[data-ctxkit-projection]'), [firstHost],
@@ -2816,15 +2842,17 @@ ok('a row draws one pencil per editable target, keyed by seq and block', () => {
   globalThis.__ctxkitOpened = [];
   globalThis.__ctxkitGeneration = { running: false, notices: [] };
   globalThis.__ctxkitDocument = {
-    querySelectorAll: (selector) => (selector === '[data-chat-flow] > [data-chat-flow-key]' ? [row] : []),
+    querySelectorAll: (selector) => (selector === '[data-chat-flow] [data-chat-flow-key]' ? [row] : []),
     createTextNode: (text) => Object.assign(fakeElement('#text'), { textContent: text }),
-    createElement: (tag) => fakeElement(tag)
+    createElement: (tag) => fakeElement(tag),
+    createElementNS: (_namespace, tag) => fakeElement(tag)
   };
   const { STATE, decorateTranscript, pinCss } = panelConsts(script, [
     'STATE', 'targetsOf', 'labelOf', 'optionValue', 'fallbackTarget', 'FLOW_SELECTOR', 'PENCIL_ATTR', 'flowRows', 'chatRows', 'running',
     'flowBody', 'messageIdOf', 'turnOf', 'stepPrefix', 'stepOf', 'pinCss', 'parseKey', 'keyOf',
     'pointed', 'pointerOnce', 'pointerEdit', 'pinAt', 'INNER_CONTROL', 'GESTURE_GRACE',
     'hovered', 'hoverOnce', 'addPencil', 'entryFor', 'targetOf', 'deletedTurnsOf', 'deletedEntryFor', 'pinTargets', 'sameTarget',
+    'icon', 'CHECK_PATH', 'CROSS_PATH',
     'projections', 'pinnedRows', 'rowOwners', 'decorateTranscript'
   ], [
     'const document = globalThis.__ctxkitDocument;',
@@ -2834,6 +2862,8 @@ ok('a row draws one pencil per editable target, keyed by seq and block', () => {
     'const getComputedStyle = () => ({ position: "static" });',
     'const projectRow = () => {};', // Display projection is driven by the full browser regression.
     'const placePencil = () => {};', // Geometry and native anchoring are covered in Chromium.
+    'const decorateBlocks = () => {}; const decorateRowRestores = () => {}; const blockViews = new Set(); const toolControls = new Map(); const rowRestores = new Map();',
+    'const textLayout = () => ({ targets: [], texts: [], thoughts: [], containers: [1], thinks: [1] });',
     'const openAt = (seq, at) => { globalThis.__ctxkitOpened.push([seq, at]); };'
   ].join('\n'));
 
@@ -2844,36 +2874,33 @@ ok('a row draws one pencil per editable target, keyed by seq and block', () => {
   assert.equal(pins().length, 2, `a reply that thinks and answers must draw two pencils, drew ${pins().length}`);
   assert.deepEqual(pins().map((pin) => pin.getAttribute('data-ctxkit-for')), ['15:0', '15:1'],
     'the pencils are not keyed <seq>:<at>');
-  // The label is the button's whole content, and that button is now the keyboard path only: the
-  // pointer opens the editor on the message text itself.
-  assert.deepEqual(pins().map((pin) => pinButton(pin).textContent), ['Edit thinking', 'Edit answer'],
-    'the accessible name must survive even though the chip is no longer painted');
-  // FALSIFICATION OF THE OLD BUTTON: it held a pencil svg before the label. The label alone is
-  // the button now, so any icon element coming back fails here.
-  assert.deepEqual(pins().map((pin) => pinButton(pin).children.filter((child) => child.tagName === 'SVG').length), [0, 0],
-    'the chip must be its label alone; the pencil glyph must not come back');
-  // FALSIFICATION OF THE VISIBLE CHIP, whatever shape it takes - first a label row below the
-  // block, then a labelled chip seated on its corner, and in both the pointer was the chip. The
-  // pin must now paint nothing at rest, the message text must be the way in, and only keyboard
-  // focus may add a plugin outline. These live here rather than in the stylesheet check above because that
-  // check is already red on an unrelated rule and never reaches its tail.
-  assert.ok(!SCRIPT.includes('PLANT_ATTR') && !SCRIPT.includes('plantLift'), 'the seated-chip placement is back');
-  assert.ok(pinCss.includes('clip-path: inset(50%)'), 'the resting chip must collapse to the visually-hidden square');
-  assert.ok(!pinCss.includes(':host(:hover) button'), 'pointer hover must not paint the chip');
-  assert.ok(SCRIPT.includes('pointerEdit'), 'the message text must be the pointer path');
-  assert.ok(SCRIPT.includes('pin.open = open'), 'the text click and the button must share one action');
-  assert.ok(SCRIPT.includes("a, button, input, textarea, select, summary, code, pre"),
-    'a link, code or control inside the text must stay the shell\'s');
-  assert.ok(SCRIPT.includes('isCollapsed === false'), 'a click made while text is selected must not open the editor');
-  assert.ok(SCRIPT.includes('event.button !== 0'), 'a right click must not open the editor');
-  assert.ok(SCRIPT.includes('data-ctxkit-affordance') && !SCRIPT.includes("'[' + EDIT_ATTR + ']:hover"),
-    'the plugin still owns pointer-hover paint');
-  assert.ok(SCRIPT.includes("FLOW_SELECTOR + ':has([' + PENCIL_ATTR + ']:focus-within) [' + EDIT_ATTR + ']"),
-    'the marked region lost its keyboard focus outline when its pin moved into a native action strip');
-  assert.ok(SCRIPT.includes('data-ctxkit-edit'), 'the editable regions must remain marked for clicks and focus');
+  // The actions are explicit icons. Each button carries its accessible name; the visual
+  // content is one drawn glyph, never a label chip that moves the message.
+  assert.deepEqual(pins().map((pin) => pinButton(pin).textContent), ['', ''],
+    'the floating toolbar must paint icons, not text chips');
+  assert.deepEqual(pins().map((pin) => pinButton(pin).children.filter((child) => child.tagName === 'SVG').length), [1, 1],
+    'each action must be one drawn glyph');
+  assert.deepEqual(pins().map((pin) => pinButton(pin).getAttribute('aria-label')),
+    ['Edit thinking (seq 15, block 0)', 'Edit answer (seq 15, block 1)'],
+    'the accessible name must identify the exact target');
+  // FALSIFICATION OF TEXT-CLICK EDITING: a plain click, double click or triple click belongs
+  // to the reader. pointerEdit must stay inert and no pin may be opened from pointerEdit.
+  assert.ok(pinCss.includes('position: absolute'), 'the toolbar must not occupy message flow');
+  assert.ok(pinCss.includes('opacity: 0') && pinCss.includes('pointer-events: none'),
+    'the resting toolbar must be invisible and transparent to text gestures');
+  assert.ok(pinCss.includes('[data-hover]'), 'hover must reveal the toolbar');
+  assert.ok(SCRIPT.includes('const pointerEdit = () => {}'),
+    'a text click can open an editor again');
+  assert.ok(!SCRIPT.includes('pin.open(pin.blockAt'),
+    'the removed text-click path came back');
+  assert.ok(SCRIPT.includes('source.after(pin)'),
+    'the inline editor must move its pin out before replacing the native block children');
+  assert.ok(SCRIPT.includes('data-ctxkit-edit'), 'the editable regions must remain marked for keyboard focus');
   assert.ok(SCRIPT.includes('var(--dsw-alias-brand-primary'), 'keyboard focus must use a theme token, not a new palette');
-  assert.ok(pinCss.includes('min-height: 44px; min-width: 44px;'), 'the focused chip must keep its touch size');
-  assert.ok(SCRIPT.includes("button.textContent = 'Edit '"), 'the chip must be its own label, not an icon plus a label');
+  assert.ok(pinCss.includes('min-height: 44px; min-width: 44px;'), 'the focused toolbar must keep its touch size');
+  assert.ok(SCRIPT.includes('icon(button, button.title'), 'the edit action must be drawn');
+  assert.ok(SCRIPT.includes('Restore original '), 'a changed block must offer restoring its original text');
+  assert.ok(SCRIPT.includes("contextKit.edit.deleteBlock"), 'a block must offer explicit deletion');
   assert.ok(!SCRIPT.includes('button.innerHTML'), 'the removed pencil glyph markup is back');
   // SAVE AND CANCEL ARE DRAWINGS: a checkmark and a cross, with the name kept for assistive
   // technology, and the busy word still the one piece of live text in that row.
@@ -2938,15 +2965,17 @@ ok('signed thinking receives the same per-block pencil as unsigned thinking', ()
   globalThis.__ctxkitOpened = [];
   globalThis.__ctxkitGeneration = { running: false, notices: [] };
   globalThis.__ctxkitDocument = {
-    querySelectorAll: (selector) => (selector === '[data-chat-flow] > [data-chat-flow-key]' ? [row] : []),
+    querySelectorAll: (selector) => (selector === '[data-chat-flow] [data-chat-flow-key]' ? [row] : []),
     createTextNode: (text) => Object.assign(fakeElement('#text'), { textContent: text }),
-    createElement: (tag) => fakeElement(tag)
+    createElement: (tag) => fakeElement(tag),
+    createElementNS: (_namespace, tag) => fakeElement(tag)
   };
   const { STATE, decorateTranscript } = panelConsts(script, [
     'STATE', 'targetsOf', 'labelOf', 'optionValue', 'fallbackTarget', 'FLOW_SELECTOR', 'PENCIL_ATTR', 'flowRows', 'chatRows', 'running',
     'flowBody', 'messageIdOf', 'turnOf', 'stepPrefix', 'stepOf', 'pinCss', 'parseKey', 'keyOf',
     'pointed', 'pointerOnce', 'pointerEdit', 'pinAt', 'INNER_CONTROL', 'GESTURE_GRACE',
     'hovered', 'hoverOnce', 'addPencil', 'entryFor', 'targetOf', 'deletedTurnsOf', 'deletedEntryFor', 'pinTargets', 'sameTarget',
+    'icon', 'CHECK_PATH', 'CROSS_PATH',
     'projections', 'pinnedRows', 'rowOwners', 'decorateTranscript'
   ], [
     'const document = globalThis.__ctxkitDocument;',
@@ -2956,6 +2985,8 @@ ok('signed thinking receives the same per-block pencil as unsigned thinking', ()
     'const getComputedStyle = () => ({ position: "static" });',
     'const projectRow = () => {};',
     'const placePencil = () => {};',
+    'const decorateBlocks = () => {}; const decorateRowRestores = () => {}; const blockViews = new Set(); const toolControls = new Map(); const rowRestores = new Map();',
+    'const textLayout = () => ({ targets: [], texts: [], thoughts: [], containers: [1], thinks: [1] });',
     'const openAt = (seq, at) => { globalThis.__ctxkitOpened.push([seq, at]); };'
   ].join('\n'));
   const pins = () => row.querySelectorAll(':scope > [data-ctxkit-pencil]');
