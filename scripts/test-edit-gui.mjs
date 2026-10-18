@@ -2893,8 +2893,10 @@ ok('a row draws one pencil per editable target, keyed by seq and block', () => {
     'a text click can open an editor again');
   assert.ok(!SCRIPT.includes('pin.open(pin.blockAt'),
     'the removed text-click path came back');
-  assert.ok(SCRIPT.includes('source.after(pin)'),
+  assert.ok(SCRIPT.includes('if (pin.parentNode === source) source.after(pin);'),
     'the inline editor must move its pin out before replacing the native block children');
+  assert.ok(SCRIPT.includes('pin.parentNode === parent'),
+    'a pin moved out for inline editing must be re-seated when editing ends');
   assert.ok(SCRIPT.includes('data-ctxkit-edit'), 'the editable regions must remain marked for keyboard focus');
   assert.ok(SCRIPT.includes('var(--dsw-alias-brand-primary'), 'keyboard focus must use a theme token, not a new palette');
   assert.ok(pinCss.includes('min-height: 44px; min-width: 44px;'), 'the focused toolbar must keep its touch size');
