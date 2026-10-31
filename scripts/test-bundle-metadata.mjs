@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readPluginMeta } from '@deepseek-ai/dsh-app-boot';
@@ -24,8 +25,8 @@ const expectedPeers = {
 
 assert.equal(manifest.name, 'dsh-context-kit');
 assert.equal(manifest.version, '0.1.11');
-assert.equal(manifest.private, true, 'the Git/local bundle must remain private');
-assert.equal(manifest.license, 'UNLICENSED', 'the private bundle must not invent an open-source grant');
+assert.notEqual(manifest.private, true, 'a published bundle must stay installable from Git and the registry');
+assert.equal(manifest.license, 'MIT', 'the published bundle declares its open-source grant');
 assert.equal(manifest.engines?.node, '>=22.19.0');
 assert.equal(manifest.type, 'module');
 assert.equal(manifest.exports?.['.'], './lib/index.js');
@@ -184,12 +185,14 @@ for (const subpath of ['./editor-plugin', './plugin']) {
   assert.equal(typeof imported.apply, 'function', `${subpath} must resolve and import through package exports`);
 }
 
+const machineUser = userInfo().username.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+
 for (const path of inventory.filter(file => /\.(?:c?js|mjs|json|ya?ml|md|css|html|txt)$/iu.test(file))) {
   const source = await readFile(join(root, path), 'utf8');
   assert.doesNotMatch(source, /file:\/\/\/[A-Za-z]:\//iu, `packed file embeds a local file URL: ${path}`);
   assert.doesNotMatch(
     source,
-    /(?:pro100noob|[\\/]palette-rewrite[\\/]|_npx[\\/][0-9a-f]{8,})/iu,
+    new RegExp(`(?:${machineUser}|[\\\\/]palette-rewrite[\\\\/]|_npx[\\\\/][0-9a-f]{8,})`, 'iu'),
     `packed file embeds a developer-machine path: ${path}`,
   );
 }

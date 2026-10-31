@@ -1,10 +1,17 @@
 {
   "name": "dsh-context-kit",
   "version": "0.1.11",
-  "private": true,
   "type": "module",
   "description": "Native DeepSeek Harness integrations for DCP, Context Mode, and History Editor.",
-  "license": "UNLICENSED",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/axtrask/dsh-context-kit.git"
+  },
+  "homepage": "https://github.com/axtrask/dsh-context-kit#readme",
+  "bugs": {
+    "url": "https://github.com/axtrask/dsh-context-kit/issues"
+  },
   "engines": {
     "node": ">=22.19.0",
     "dsh": "0.2.0-rc.2 || ^0.2.1-rc.2"

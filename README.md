@@ -1,6 +1,6 @@
 # dsh-context-kit
 
-`dsh-context-kit` is one private DeepSeek Harness bundle that installs native context-management and history-editing features:
+`dsh-context-kit` is one DeepSeek Harness bundle that installs native context-management and history-editing features:
 
 - **DCP** adds model-directed compression and deterministic context cleanup.
 - **Context Mode** adds sandboxed processing and a searchable local knowledge base so large outputs do not have to enter the conversation.
@@ -15,7 +15,7 @@ The bundle reimplements useful behavior in Harness-native services. It does not 
 - A compatible DeepSeek Harness installation that supplies the optional `@deepseek-ai/*` peer packages declared in `package.json`.
 - The Harness `plugin_manager` tool.
 
-This repository is private and `UNLICENSED`. Installing it does not grant permission to redistribute it.
+MIT licensed. Installation from the Git checkout is supported; no registry publication is required.
 
 ## Supported installation
 
@@ -37,10 +37,14 @@ Use the repository root as `target`, not `lib`, `packages/cdsh`, or a generated 
 
 ### Git checkout
 
-Clone from the Git URL supplied by the repository owner, then install that checkout with the same `plugin_manager install_bundle` call:
+```sh
+git clone https://github.com/axtrask/dsh-context-kit.git dsh-context-kit
+```
+
+Install that absolute checkout path with the same `plugin_manager install_bundle` call, or let the profile depend on the repository directly — the spec `pnpm add` accepts:
 
 ```sh
-git clone <git-url> dsh-context-kit
+pnpm add git+https://github.com/axtrask/dsh-context-kit.git
 ```
 
 For an update, pull the desired revision and install the same absolute checkout path again. Read the `application` and `warnings` fields returned by `plugin_manager`; they state whether the update was applied live or needs a restart.
